@@ -253,6 +253,7 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
             title="ViT mosaic (phase)"
             path={`${path}/vit/mosaic`}
             slice=":,:"
+            cmap="magma"
             pollIntervalMs={vitPollMs}
             onChanged={handleVitChanged}
           />
