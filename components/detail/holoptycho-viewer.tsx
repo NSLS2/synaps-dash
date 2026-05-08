@@ -254,6 +254,13 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
     setLastUpdateAt(Date.now());
   }, []);
 
+  // Frame slider state. `null` = follow latest (default). Once the user
+  // drags, we lock to that index until they hit "Follow" to resume tracking.
+  const [selectedFrameIdx, setSelectedFrameIdx] = useState<number | null>(null);
+  const displayFrameIdx =
+    selectedFrameIdx !== null ? selectedFrameIdx : latestFrameIdx;
+  const isFollowingLatest = selectedFrameIdx === null;
+
   // Initial discovery: figure out which sub-containers exist on this run.
   useEffect(() => {
     let cancelled = false;
@@ -372,15 +379,49 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
             onChanged={handleProbeChanged}
           />
         )}
-        {isFineTune && latestFrameIdx !== null && (
-          <TiledImageTile
-            title="Latest detector frame"
-            subtitle={`frame ${latestFrameIdx}`}
-            path={`${path}/diffraction/dp`}
-            slice={latestFrameIdx}
-            pollIntervalMs={POLL_INTERVAL_MS}
-            onChanged={handleFrameChanged}
-          />
+        {isFineTune && latestFrameIdx !== null && displayFrameIdx !== null && (
+          <div className="flex flex-col">
+            <TiledImageTile
+              title="Detector frame"
+              subtitle={
+                isFollowingLatest
+                  ? `frame ${latestFrameIdx} (latest)`
+                  : `frame ${displayFrameIdx} / ${latestFrameIdx}`
+              }
+              path={`${path}/diffraction/dp`}
+              slice={displayFrameIdx}
+              // Only poll while we're tracking the latest. When the user
+              // has scrubbed to an older frame, that frame doesn't change,
+              // so polling just wastes round-trips.
+              pollIntervalMs={isFollowingLatest ? POLL_INTERVAL_MS : 0}
+              onChanged={handleFrameChanged}
+            />
+            <div className="flex items-center gap-2 mt-2 px-1">
+              <input
+                type="range"
+                min={0}
+                max={latestFrameIdx}
+                step={1}
+                value={displayFrameIdx}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  // Snap-to-latest when the user drags to the rightmost end.
+                  setSelectedFrameIdx(v >= latestFrameIdx ? null : v);
+                }}
+                aria-label="Detector frame index"
+                className="flex-1 accent-beam"
+              />
+              {!isFollowingLatest && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedFrameIdx(null)}
+                  className="text-[10px] uppercase tracking-wider text-beam hover:text-beam-hover px-2 py-0.5 rounded border border-beam/40 hover:bg-beam/10"
+                >
+                  Follow
+                </button>
+              )}
+            </div>
+          </div>
         )}
       </div>
 
