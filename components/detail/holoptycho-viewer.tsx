@@ -11,6 +11,7 @@ import {
 } from '@/lib/tiled/client';
 import { paintFloatArrayToCanvas } from '@/lib/tiled/colormap';
 import { useTiledSubscription } from '@/hooks/use-tiled-subscription';
+import { useLatestFilledIndex } from '@/hooks/use-latest-filled-index';
 
 interface HoloptychoViewerProps {
   // Path to the run container, e.g. hxn/processed/holoptycho/{run_uid}
@@ -33,12 +34,17 @@ const POLL_INTERVAL_MS = 2000;
 // Decode raw bytes from Tiled into the right TypedArray for `dtype`. We assume
 // little-endian on the wire (Tiled's default, and matches every machine we
 // run on); returns null if the dtype isn't one we can render.
+//
+// uint16 support is here so the detector-frame intensity tile (written by
+// holoptycho when fine_tune=true) can be rendered alongside the float-typed
+// reconstruction tiles.
 function decodeFloatBuffer(
   buffer: ArrayBuffer,
   dtype: { kind: string; itemsize: number },
-): Float32Array | Float64Array | null {
+): Float32Array | Float64Array | Uint16Array | null {
   if (dtype.kind === 'f' && dtype.itemsize === 4) return new Float32Array(buffer);
   if (dtype.kind === 'f' && dtype.itemsize === 8) return new Float64Array(buffer);
+  if (dtype.kind === 'u' && dtype.itemsize === 2) return new Uint16Array(buffer);
   return null;
 }
 
@@ -121,7 +127,12 @@ function TiledImageTile({
         }
         return false;
       }
-      if (info.dtype.kind !== 'f') {
+      // Floats (live/final reconstructions) and uint16 (detector-frame
+      // intensity) are the dtypes we know how to colormap.
+      const dtypeOk =
+        info.dtype.kind === 'f' ||
+        (info.dtype.kind === 'u' && info.dtype.itemsize === 2);
+      if (!dtypeOk) {
         if (!cancelled) {
           setError(`Unsupported dtype: ${info.dtype.kind}${info.dtype.itemsize}`);
           setHasLoadedOnce(true);
@@ -228,7 +239,19 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
     return () => clearInterval(handle);
   }, []);
 
-  const containerMeta = metadata as { scan_id?: number | string; recon_mode?: string; run_uid?: string } | undefined;
+  const containerMeta = metadata as { scan_id?: number | string; recon_mode?: string; run_uid?: string; fine_tune?: boolean } | undefined;
+  const isFineTune = containerMeta?.fine_tune === true;
+
+  // Track the most recent filled index in <run>/positions_um — used as the
+  // slice index for the latest detector-frame tile. Only polls when this is
+  // a fine-tuning run (the dp buffer is only present in that case).
+  const latestFrameIdx = useLatestFilledIndex(
+    isFineTune ? path : '',
+    isFineTune ? POLL_INTERVAL_MS : 0,
+  );
+  const handleFrameChanged = useCallback(() => {
+    setLastUpdateAt(Date.now());
+  }, []);
 
   // Initial discovery: figure out which sub-containers exist on this run.
   useEffect(() => {
@@ -346,6 +369,16 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
             slice={0}
             pollIntervalMs={iterativePollMs}
             onChanged={handleProbeChanged}
+          />
+        )}
+        {isFineTune && latestFrameIdx !== null && (
+          <TiledImageTile
+            title="Latest detector frame"
+            subtitle={`frame ${latestFrameIdx}`}
+            path={`${path}/diffraction/dp`}
+            slice={latestFrameIdx}
+            pollIntervalMs={POLL_INTERVAL_MS}
+            onChanged={handleFrameChanged}
           />
         )}
       </div>

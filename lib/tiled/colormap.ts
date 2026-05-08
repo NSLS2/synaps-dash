@@ -40,13 +40,17 @@ export const VIRIDIS_LUT: [number, number, number][] = [
   [207,241,26],[209,241,25],[212,242,24],[215,242,24],[217,242,23],[220,243,22],[222,243,22],[225,243,21],
 ];
 
-// Paint a 2D float array onto `canvas` with viridis. Normalises to
+// Paint a 2D numeric array onto `canvas` with viridis. Normalises to
 // [min, max] excluding NaNs; NaN pixels are written with alpha=0 so the
 // underlying surface shows through. The canvas is resized to (width, height)
 // — CSS handles display scaling.
+//
+// Float arrays carry NaN through; integer arrays (e.g. uint16 detector
+// frames) are always finite, so the NaN check is a no-op for them. One
+// signature handles both so callers don't have to fork on dtype.
 export function paintFloatArrayToCanvas(
   canvas: HTMLCanvasElement,
-  data: Float32Array | Float64Array,
+  data: Float32Array | Float64Array | Uint16Array,
   width: number,
   height: number,
 ): void {
