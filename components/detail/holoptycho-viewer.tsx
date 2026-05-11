@@ -324,10 +324,10 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
     );
   }
 
-  if (!sources.iterativeSource && !sources.hasVit) {
+  if (!sources.iterativeSource && !sources.hasVit && !sources.hasDiffraction) {
     return (
       <div className="flex items-center justify-center h-32 rounded-xl bg-surface-raised border border-border-subtle">
-        <span className="text-sm text-text-tertiary">Run has no live/, final/, or vit/ data yet</span>
+        <span className="text-sm text-text-tertiary">Run has no diffraction/, live/, final/, or vit/ data yet</span>
       </div>
     );
   }

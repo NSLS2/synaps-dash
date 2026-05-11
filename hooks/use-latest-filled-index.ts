@@ -24,6 +24,12 @@ export function useLatestFilledIndex(
   const [latest, setLatest] = useState<number | null>(null);
 
   useEffect(() => {
+    // Caller passes an empty runPath when the run has no diffraction subtree
+    // yet (e.g. a fresh run whose container metadata listing hasn't landed).
+    // Skip the fetch entirely — building `${''}/positions_um` would hit the
+    // catalog root and 404.
+    if (!runPath) return;
+
     let cancelled = false;
     let etag: string | null = null;
     let inflight = false;
