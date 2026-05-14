@@ -40,10 +40,29 @@ export const VIRIDIS_LUT: [number, number, number][] = [
   [207,241,26],[209,241,25],[212,242,24],[215,242,24],[217,242,23],[220,243,22],[222,243,22],[225,243,21],
 ];
 
-// Paint a 2D numeric array onto `canvas` with viridis. Normalises to
-// [min, max] excluding NaNs; NaN pixels are written with alpha=0 so the
-// underlying surface shows through. The canvas is resized to (width, height)
-// — CSS handles display scaling.
+// Compute the p-th percentile of finite values in a typed array.
+function percentile(
+  data: Float32Array | Float64Array | Uint16Array | Uint8Array,
+  p: number,
+  mask?: Uint8Array,
+): number {
+  const vals: number[] = [];
+  for (let i = 0; i < data.length; i++) {
+    if (mask && !mask[i]) continue;
+    const v = data[i];
+    if (!Number.isNaN(v) && Number.isFinite(v)) vals.push(v);
+  }
+  if (vals.length === 0) return 0;
+  vals.sort((a, b) => a - b);
+  const idx = Math.min(Math.floor((p / 100) * vals.length), vals.length - 1);
+  return vals[idx];
+}
+
+// Paint a 2D numeric array onto `canvas` with viridis. Normalises contrast
+// using 1st/99th percentile of the central 50% of the image (matching offline
+// analysis behaviour). NaN pixels are written with alpha=0 so the underlying
+// surface shows through. The canvas is resized to (width, height) — CSS
+// handles display scaling.
 //
 // Float arrays carry NaN through; integer arrays (e.g. uint16 detector
 // frames) are always finite, so the NaN check is a no-op for them. One
@@ -54,13 +73,23 @@ export function paintFloatArrayToCanvas(
   width: number,
   height: number,
 ): void {
-  let min = Infinity;
-  let max = -Infinity;
-  for (let i = 0; i < data.length; i++) {
-    const v = data[i];
-    if (Number.isNaN(v)) continue;
-    if (v < min) min = v;
-    if (v > max) max = v;
+  // Build a mask for the central 50% of the image (middle half in each dim)
+  const y0 = Math.floor(height / 4);
+  const y1 = Math.floor((3 * height) / 4);
+  const x0 = Math.floor(width / 4);
+  const x1 = Math.floor((3 * width) / 4);
+  const centralMask = new Uint8Array(data.length);
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      centralMask[y * width + x] = 1;
+    }
+  }
+  let min = percentile(data, 1, centralMask);
+  let max = percentile(data, 99, centralMask);
+  // Fall back to global range if central region is all-NaN or constant
+  if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) {
+    min = percentile(data, 1);
+    max = percentile(data, 99);
   }
   // All-NaN or constant arrays: avoid divide-by-zero / non-finite range.
   const range = Number.isFinite(min) && max > min ? max - min : 1;

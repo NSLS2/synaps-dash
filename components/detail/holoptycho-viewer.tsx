@@ -24,6 +24,8 @@ interface SourceInfo {
   iterativeSource: 'live' | 'final' | null;
   // Whether vit/pred_latest is available.
   hasVit: boolean;
+  // Whether vit/mosaic_amp is available (written by current holoptycho; absent on older runs).
+  hasVitAmp: boolean;
   // Whether <run>/diffraction/dp exists (always-on for runs created by
   // current holoptycho, absent on older runs).
   hasDiffraction: boolean;
@@ -68,13 +70,17 @@ async function discoverSources(runPath: string): Promise<SourceInfo> {
     const children = await listChildren(runPath, { limit: 10 });
     const ids = new Set(children.items.map(c => c.id));
     const iterativeSource = ids.has('live') ? 'live' : ids.has('final') ? 'final' : null;
-    return {
-      iterativeSource,
-      hasVit: ids.has('vit'),
-      hasDiffraction: ids.has('diffraction'),
-    };
+    const hasVit = ids.has('vit');
+    let hasVitAmp = false;
+    if (hasVit) {
+      try {
+        const vitChildren = await listChildren(`${runPath}/vit`, { limit: 20 });
+        hasVitAmp = vitChildren.items.some(c => c.id === 'mosaic_amp');
+      } catch { /* absent on older runs */ }
+    }
+    return { iterativeSource, hasVit, hasVitAmp, hasDiffraction: ids.has('diffraction') };
   } catch {
-    return { iterativeSource: null, hasVit: false, hasDiffraction: false };
+    return { iterativeSource: null, hasVit: false, hasVitAmp: false, hasDiffraction: false };
   }
 }
 
@@ -234,7 +240,7 @@ function TiledImageTile({
 }
 
 export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
-  const [sources, setSources] = useState<SourceInfo>({ iterativeSource: null, hasVit: false, hasDiffraction: false });
+  const [sources, setSources] = useState<SourceInfo>({ iterativeSource: null, hasVit: false, hasVitAmp: false, hasDiffraction: false });
   const [isDiscovering, setIsDiscovering] = useState(true);
   const [iteration, setIteration] = useState<number | null>(null);
   const [vitBatch, setVitBatch] = useState<number | null>(null);
@@ -368,13 +374,48 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
     <div className="space-y-3">
       <div className="grid grid-cols-2 gap-3">
         {objectPath && (
+          <>
+            <TiledImageTile
+              title={`${sources.iterativeSource === 'live' ? 'Iterative' : 'Final'} object |·|`}
+              subtitle={iteration !== null ? `iter ${iteration}` : undefined}
+              path={objectPath}
+              slice={0}
+              pollIntervalMs={iterativePollMs}
+              onChanged={handleObjectChanged}
+            />
+            <TiledImageTile
+              title={`${sources.iterativeSource === 'live' ? 'Iterative' : 'Final'} object phase`}
+              subtitle={iteration !== null ? `iter ${iteration}` : undefined}
+              path={objectPath}
+              slice={1}
+              pollIntervalMs={iterativePollMs}
+            />
+          </>
+        )}
+        {probePath && (
+          <>
+            <TiledImageTile
+              title="Probe |·|"
+              path={probePath}
+              slice={0}
+              pollIntervalMs={iterativePollMs}
+              onChanged={handleProbeChanged}
+            />
+            <TiledImageTile
+              title="Probe phase"
+              path={probePath}
+              slice={1}
+              pollIntervalMs={iterativePollMs}
+            />
+          </>
+        )}
+        {sources.hasVitAmp && (
           <TiledImageTile
-            title={`${sources.iterativeSource === 'live' ? 'Iterative' : 'Final'} object |·|`}
-            subtitle={iteration !== null ? `iter ${iteration}` : undefined}
-            path={objectPath}
-            slice={0}
-            pollIntervalMs={iterativePollMs}
-            onChanged={handleObjectChanged}
+            title="ViT mosaic (amp)"
+            subtitle={vitBatch !== null ? `batch ${vitBatch}` : undefined}
+            path={`${path}/vit/mosaic_amp`}
+            slice=":,:"
+            pollIntervalMs={vitPollMs}
           />
         )}
         {sources.hasVit && (
@@ -387,18 +428,9 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
             onChanged={handleVitChanged}
           />
         )}
-        {probePath && (
-          <TiledImageTile
-            title="Probe |·|"
-            path={probePath}
-            slice={0}
-            pollIntervalMs={iterativePollMs}
-            onChanged={handleProbeChanged}
-          />
-        )}
         {sources.hasDiffraction && latestFrameIdx !== null && displayFrameIdx !== null && (
           <div className="flex flex-col col-span-2">
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-3 gap-3">
               <TiledImageTile
                 title="Detector frame"
                 subtitle={(() => {
@@ -418,12 +450,20 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
                 onChanged={handleFrameChanged}
               />
               <TiledImageTile
-                title="ViT inference (phase)"
+                title="ViT patch (amp)"
+                subtitle={`frame ${displayFrameIdx * dpStride}`}
+                path={`${path}/diffraction/inference`}
+                slice={`${displayFrameIdx},0`}
+                pollIntervalMs={isFollowingLatest ? POLL_INTERVAL_MS : 0}
+              />
+              <TiledImageTile
+                title="ViT patch (phase)"
                 subtitle={`frame ${displayFrameIdx * dpStride}`}
                 path={`${path}/diffraction/inference`}
                 slice={`${displayFrameIdx},1`}
                 pollIntervalMs={isFollowingLatest ? POLL_INTERVAL_MS : 0}
               />
+
             </div>
             <div className="flex items-center gap-2 mt-2 px-1">
               <input
