@@ -53,8 +53,9 @@ export class TiledWebSocket {
       url = `${wsProtocol}//${window.location.host}/api/ws/${this.path}`;
 
       // Pass token as query param to our proxy
+      // For Entra sessions, don't send a token - the proxy reads httpOnly cookies
       const params = new URLSearchParams();
-      if (token) {
+      if (authType !== 'entra' && token) {
         params.set('token', token);
         params.set('auth_type', authType || 'token');
       }

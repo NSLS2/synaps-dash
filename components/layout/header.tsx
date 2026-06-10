@@ -64,8 +64,11 @@ export function Header({ isConnected = false }: HeaderProps) {
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-surface-raised/50 border border-border-subtle">
               <User className="w-3.5 h-3.5 text-cell" />
               <span className="text-[12px] font-mono text-text-secondary">
-                {user?.identities?.[0]?.id || 'User'}
+                {user?.displayName || 'User'}
               </span>
+              {user?.source === 'entra' && (
+                <span className="text-[9px] font-medium text-nebula bg-nebula/10 px-1.5 py-0.5 rounded">SSO</span>
+              )}
             </div>
             <Button
               variant="ghost"

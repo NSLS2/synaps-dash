@@ -1,7 +1,7 @@
 'use client';
 
 import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
-import { TiledUser } from '@/lib/tiled/types';
+import { TiledUser, AppSessionUser } from '@/lib/tiled/types';
 import {
   getStoredTokens,
   getStoredApiKey,
@@ -14,11 +14,13 @@ import {
   isTokenExpired,
   isRefreshTokenExpired,
   getTokenStatus,
+  setEntraAuthMarker,
+  clearEntraAuthMarker,
 } from '@/lib/tiled/auth';
 import { onAuthError } from '@/lib/tiled/client';
 
 interface AuthState {
-  user: TiledUser | null;
+  user: AppSessionUser | null;
   isAuthenticated: boolean;
   isLoading: boolean;
   accessToken: string | null;
@@ -27,6 +29,7 @@ interface AuthState {
 interface AuthContextValue extends AuthState {
   login: (username: string, password: string) => Promise<void>;
   loginWithApiKey: (apiKey: string) => Promise<void>;
+  loginWithEntra: () => void;
   logout: () => Promise<void>;
 }
 
@@ -41,15 +44,38 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   });
 
   const checkAuth = useCallback(async () => {
-    const authType = getAuthType();
+    // 1. FIRST: Check for Entra cookie session via /api/auth/session
+    try {
+      const sessionResponse = await fetch('/api/auth/session');
+      if (sessionResponse.ok) {
+        const sessionData = await sessionResponse.json();
+        setEntraAuthMarker();
+        setState({
+          user: {
+            username: sessionData.username,
+            displayName: sessionData.display_name,
+            source: 'entra',
+          },
+          isAuthenticated: true,
+          isLoading: false,
+          accessToken: null, // Server-side cookies handle auth
+        });
+        return;
+      }
+      // Non-200: clear stale Entra marker
+      clearEntraAuthMarker();
+    } catch {
+      // Network error: keep marker unchanged, continue to fallback
+    }
 
-    // Check API key auth first
+    // 2. Check API key auth
+    const authType = getAuthType();
     if (authType === 'apikey') {
       const apiKey = getStoredApiKey();
       if (apiKey) {
         const user = await getCurrentUser(apiKey);
         setState({
-          user,
+          user: user ? { username: user.identities?.[0]?.id || 'user', displayName: user.identities?.[0]?.id || 'user', source: 'tiled', tiledUser: user } : null,
           isAuthenticated: !!user,
           isLoading: false,
           accessToken: apiKey,
@@ -58,7 +84,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     }
 
-    // Token-based auth
+    // 3. Token-based auth
     const { accessToken } = getStoredTokens();
 
     if (!accessToken) {
@@ -96,11 +122,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    const user = await getCurrentUser(currentToken);
+    const tiledUser = await getCurrentUser(currentToken);
 
     setState({
-      user,
-      isAuthenticated: !!user,
+      user: tiledUser ? { username: tiledUser.identities?.[0]?.id || 'user', displayName: tiledUser.identities?.[0]?.id || 'user', source: 'tiled', tiledUser } : null,
+      isAuthenticated: !!tiledUser,
       isLoading: false,
       accessToken: currentToken,
     });
@@ -127,9 +153,45 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // Refresh token proactively and when tab becomes visible
   useEffect(() => {
     if (!state.isAuthenticated) return;
-    if (getAuthType() === 'apikey') return; // API keys don't expire
 
-    // Always try to refresh - don't wait for expiry since refresh tokens may also be short-lived
+    const authType = getAuthType();
+
+    // API keys don't expire
+    if (authType === 'apikey') return;
+
+    if (authType === 'entra') {
+      // Entra sessions: periodically refresh via server-side endpoint
+      const refreshEntra = async () => {
+        try {
+          const response = await fetch('/api/auth/entra/refresh', { method: 'POST' });
+          if (!response.ok) {
+            console.log('[Auth] Entra refresh failed, re-checking session...');
+            checkAuth();
+          }
+        } catch {
+          // Network error, skip
+        }
+      };
+
+      const handleVisibilityChange = () => {
+        if (document.visibilityState === 'visible') {
+          refreshEntra();
+        }
+      };
+
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+      // Refresh every 8 minutes (access token is 10min)
+      const interval = setInterval(refreshEntra, 8 * 60 * 1000);
+      // Also refresh immediately on mount
+      refreshEntra();
+
+      return () => {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+        clearInterval(interval);
+      };
+    }
+
+    // Tiled token-based refresh logic (existing)
     const refresh = async (force = false) => {
       const status = getTokenStatus();
       console.log('[Auth] Token status:', {
@@ -139,7 +201,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         refreshExpired: status.refreshExpired,
       });
 
-      // If refresh token is expired, no point trying
       if (status.refreshExpired) {
         console.log('[Auth] Refresh token expired, cannot refresh');
         return;
@@ -157,26 +218,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     };
 
-    // Handle visibility change - refresh when tab becomes visible
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
-        console.log('[Auth] Tab visible, checking token...');
-        refresh(true); // Force refresh when coming back to tab
+        refresh(true);
       }
     };
 
-    // Handle window focus - also catches alt-tab back to browser
     const handleFocus = () => {
       refresh();
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('focus', handleFocus);
-
-    // Refresh more aggressively - every 2 minutes to stay ahead of short-lived tokens
     const interval = setInterval(() => refresh(), 2 * 60 * 1000);
-
-    // Also refresh immediately on mount to ensure fresh token
     refresh();
 
     return () => {
@@ -191,10 +245,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     try {
       const tokens = await loginWithPassword(username, password);
-      const user = await getCurrentUser(tokens.access_token);
+      const tiledUser = await getCurrentUser(tokens.access_token);
 
       setState({
-        user,
+        user: tiledUser ? { username: tiledUser.identities?.[0]?.id || username, displayName: tiledUser.identities?.[0]?.id || username, source: 'tiled', tiledUser } : null,
         isAuthenticated: true,
         isLoading: false,
         accessToken: tokens.access_token,
@@ -214,10 +268,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setState((prev) => ({ ...prev, isLoading: true }));
 
     try {
-      const user = await validateApiKey(apiKey);
+      const tiledUser = await validateApiKey(apiKey);
 
       setState({
-        user,
+        user: { username: tiledUser.identities?.[0]?.id || 'user', displayName: tiledUser.identities?.[0]?.id || 'user', source: 'tiled', tiledUser },
         isAuthenticated: true,
         isLoading: false,
         accessToken: apiKey,
@@ -233,8 +287,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  const loginWithEntra = () => {
+    window.location.href = '/api/auth/entra/login';
+  };
+
   const logout = async () => {
-    await tiledLogout();
+    const authType = getAuthType();
+
+    if (authType === 'entra') {
+      // Clear server-side session
+      try {
+        await fetch('/api/auth/entra/logout', { method: 'POST' });
+      } catch {
+        // Best effort
+      }
+      clearEntraAuthMarker();
+    } else {
+      await tiledLogout();
+    }
+
     setState({
       user: null,
       isAuthenticated: false,
@@ -244,7 +315,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ ...state, login, loginWithApiKey: loginWithApiKeyFn, logout }}>
+    <AuthContext.Provider value={{ ...state, login, loginWithApiKey: loginWithApiKeyFn, loginWithEntra, logout }}>
       {children}
     </AuthContext.Provider>
   );

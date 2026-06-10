@@ -7,7 +7,7 @@ const REFRESH_TOKEN_EXPIRY_KEY = 'tiled_refresh_token_expiry';
 const API_KEY_KEY = 'tiled_api_key';
 const AUTH_TYPE_KEY = 'tiled_auth_type';
 
-type AuthType = 'token' | 'apikey';
+type AuthType = 'token' | 'apikey' | 'entra';
 
 export function getStoredTokens(): { accessToken: string | null; refreshToken: string | null; expiresAt: number | null } {
   if (typeof window === 'undefined') {
@@ -29,6 +29,24 @@ export function getStoredApiKey(): string | null {
 export function getAuthType(): AuthType | null {
   if (typeof window === 'undefined') return null;
   return localStorage.getItem(AUTH_TYPE_KEY) as AuthType | null;
+}
+
+export function setEntraAuthMarker(): void {
+  if (typeof window === 'undefined') return;
+  localStorage.setItem(AUTH_TYPE_KEY, 'entra');
+  // Clear any Tiled tokens when switching to Entra
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(REFRESH_TOKEN_KEY);
+  localStorage.removeItem(TOKEN_EXPIRY_KEY);
+  localStorage.removeItem(REFRESH_TOKEN_EXPIRY_KEY);
+  localStorage.removeItem(API_KEY_KEY);
+}
+
+export function clearEntraAuthMarker(): void {
+  if (typeof window === 'undefined') return;
+  if (localStorage.getItem(AUTH_TYPE_KEY) === 'entra') {
+    localStorage.removeItem(AUTH_TYPE_KEY);
+  }
 }
 
 export function storeTokens(response: TokenResponse): void {
@@ -257,6 +275,11 @@ export async function logout(): Promise<void> {
 
 export async function getValidAccessToken(): Promise<string | null> {
   const authType = getAuthType();
+
+  // For Entra sessions, auth is handled server-side via cookies
+  if (authType === 'entra') {
+    return null;
+  }
 
   // If using API key, return it directly (they don't expire)
   if (authType === 'apikey') {
