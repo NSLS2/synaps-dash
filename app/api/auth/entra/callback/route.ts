@@ -6,6 +6,8 @@ import { setTokens } from '@/lib/auth/token-store';
 import { issueSessionTokens } from '@/lib/auth/jwt';
 import { setSessionCookies } from '@/lib/auth/cookies';
 
+export const runtime = 'nodejs';
+
 export async function GET(request: NextRequest) {
   assertAuthConfig();
 

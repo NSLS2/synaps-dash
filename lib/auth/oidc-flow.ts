@@ -32,9 +32,33 @@ function generateRandomString(length: number): string {
   return base64UrlEncode(bytes);
 }
 
+const BASE64URL_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+
 function base64UrlEncode(data: Uint8Array): string {
-  const base64 = Buffer.from(data).toString('base64');
-  return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  let result = '';
+  let i = 0;
+
+  // Encode full 3-byte chunks into 4 base64url chars
+  for (; i + 2 < data.length; i += 3) {
+    const n = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
+    result += BASE64URL_ALPHABET[(n >> 18) & 63];
+    result += BASE64URL_ALPHABET[(n >> 12) & 63];
+    result += BASE64URL_ALPHABET[(n >> 6) & 63];
+    result += BASE64URL_ALPHABET[n & 63];
+  }
+
+  // Encode remaining 1-2 bytes (without padding)
+  if (i < data.length) {
+    const remaining = data.length - i;
+    const n = (data[i] << 16) | (remaining === 2 ? data[i + 1] << 8 : 0);
+    result += BASE64URL_ALPHABET[(n >> 18) & 63];
+    result += BASE64URL_ALPHABET[(n >> 12) & 63];
+    if (remaining === 2) {
+      result += BASE64URL_ALPHABET[(n >> 6) & 63];
+    }
+  }
+
+  return result;
 }
 
 // ---------------------------------------------------------------------------

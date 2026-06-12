@@ -12,6 +12,8 @@ import {
   setOidcFlowCookie,
 } from '@/lib/auth/oidc-flow';
 
+export const runtime = 'nodejs';
+
 export async function GET(request: NextRequest) {
   assertAuthConfig();
 
