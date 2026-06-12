@@ -33,7 +33,7 @@ function getSecretKey(): Uint8Array {
  * Mirrors: FastAPI app/utils/auth.py create_token()
  */
 export async function createSessionToken(
-  payload: { sub: string; name: string; type: string },
+  payload: { sub: string; name: string; type: SessionPayload['type'] },
   lifetime: number
 ): Promise<string> {
   const secret = getSecretKey();
@@ -52,7 +52,7 @@ export async function createSessionToken(
  */
 export async function decodeSessionToken(
   token: string,
-  expectedType: 'access' | 'refresh' | 'oidc_flow'
+  expectedType: SessionPayload['type']
 ): Promise<SessionPayload> {
   const secret = getSecretKey();
   const { payload } = await jwtVerify(token, secret, {
