@@ -20,7 +20,7 @@ export function setSessionCookies(
   response.cookies.set(ACCESS_COOKIE, accessToken, {
     httpOnly: true,
     secure: !isLocalhost,
-    sameSite: 'strict',
+    sameSite: 'lax',
     path: '/',
     maxAge: ACCESS_TOKEN_LIFETIME,
   });
@@ -28,7 +28,7 @@ export function setSessionCookies(
   response.cookies.set(REFRESH_COOKIE, refreshToken, {
     httpOnly: true,
     secure: !isLocalhost,
-    sameSite: 'strict',
+    sameSite: 'lax',
     path: '/',
     maxAge: REFRESH_TOKEN_LIFETIME,
   });
