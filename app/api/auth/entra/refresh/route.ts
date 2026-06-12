@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { REFRESH_COOKIE } from '@/lib/auth/config';
 import { decodeSessionToken, issueSessionTokens } from '@/lib/auth/jwt';
 import { setSessionCookies, clearSessionCookies } from '@/lib/auth/cookies';
-import { getTokens, getFreshEntraToken, setTokens } from '@/lib/auth/token-store';
+import { getTokens, setTokens } from '@/lib/auth/token-store';
 import { refreshEntraAccessToken } from '@/lib/auth/entra';
 
 export async function POST(request: NextRequest) {
