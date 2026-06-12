@@ -12,7 +12,6 @@ import {
   getCurrentUser,
   refreshAccessToken,
   isTokenExpired,
-  isRefreshTokenExpired,
   getTokenStatus,
   setEntraAuthMarker,
   clearEntraAuthMarker,
@@ -150,7 +149,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    checkAuth();
+    const timer = window.setTimeout(() => {
+      void checkAuth();
+    }, 0);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
   }, [checkAuth]);
 
   // Listen for auth errors from API calls (401 responses)
