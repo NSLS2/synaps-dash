@@ -87,12 +87,26 @@ export function buildCallbackUrl(request: NextRequest): string {
 }
 
 function resolveOrigin(request: NextRequest): string {
-  const forwardedHost = request.headers.get('x-forwarded-host');
-  const forwardedProto = request.headers.get('x-forwarded-proto') || 'https';
-  const host = forwardedHost || request.headers.get('host');
+  const forwardedHost = request.headers.get('x-forwarded-host')?.split(',')[0]?.trim();
+  const forwardedProtoRaw = request
+    .headers.get('x-forwarded-proto')
+    ?.split(',')[0]
+    ?.trim()
+    ?.toLowerCase();
+  const forwardedProto =
+    forwardedProtoRaw === 'http' || forwardedProtoRaw === 'https'
+      ? forwardedProtoRaw
+      : 'https';
+  const host = forwardedHost || request.headers.get('host')?.split(',')[0]?.trim();
 
   if (host) {
-    const proto = forwardedHost ? forwardedProto : (request.nextUrl.protocol?.replace(':', '') || 'https');
+    const requestProto = request.nextUrl.protocol?.replace(':', '').toLowerCase();
+    const proto =
+      forwardedHost
+        ? forwardedProto
+        : requestProto === 'http' || requestProto === 'https'
+          ? requestProto
+          : 'https';
     const origin = `${proto}://${host}`;
 
     // If allowlist is configured, validate
