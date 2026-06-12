@@ -1,5 +1,5 @@
 import { WebSocket as NodeWebSocket } from 'ws';
-import { ACCESS_COOKIE } from '@/lib/auth/config';
+import { ACCESS_COOKIE, REFRESH_COOKIE } from '@/lib/auth/config';
 import { decodeSessionToken } from '@/lib/auth/jwt';
 import { getOboTokenForUser } from '@/lib/auth/obo';
 
@@ -84,20 +84,36 @@ export function SOCKET(
   let cookieAuthPromise: Promise<string | null> | null = null;
 
   const cookieHeader = request.headers.cookie || '';
-  const sessionCookieMatch = cookieHeader.match(
+  const accessCookieMatch = cookieHeader.match(
     new RegExp(`(?:^|;\\s*)${ACCESS_COOKIE}=([^;]+)`)
   );
+  const refreshCookieMatch = cookieHeader.match(
+    new RegExp(`(?:^|;\\s*)${REFRESH_COOKIE}=([^;]+)`)
+  );
 
-  if (sessionCookieMatch) {
+  if (accessCookieMatch || refreshCookieMatch) {
     cookieAuthPromise = (async () => {
       try {
-        const cookieValue = decodeURIComponent(sessionCookieMatch[1]);
-        const payload = await decodeSessionToken(cookieValue, 'access');
-        const oboToken = await getOboTokenForUser(payload.sub);
-        return oboToken;
+        if (accessCookieMatch) {
+          const accessCookieValue = decodeURIComponent(accessCookieMatch[1]);
+          const accessPayload = await decodeSessionToken(accessCookieValue, 'access');
+          return await getOboTokenForUser(accessPayload.sub);
+        }
+      } catch {
+        // Access cookie invalid/expired -- try refresh cookie below
+      }
+
+      try {
+        if (refreshCookieMatch) {
+          const refreshCookieValue = decodeURIComponent(refreshCookieMatch[1]);
+          const refreshPayload = await decodeSessionToken(refreshCookieValue, 'refresh');
+          return await getOboTokenForUser(refreshPayload.sub);
+        }
       } catch {
         return null;
       }
+
+      return null;
     })();
   }
 
