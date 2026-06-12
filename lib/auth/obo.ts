@@ -78,9 +78,12 @@ async function exchangeTokenObo(
  * 4. Cache the result
  * 5. Return the token
  */
-export async function getOboTokenForUser(username: string): Promise<string> {
+export async function getOboTokenForUser(
+  username: string,
+  sessionId: string
+): Promise<string> {
   const cache = getOboCache();
-  const cacheKey = `${username}:${TILED_SCOPE}`;
+  const cacheKey = `${username}:${sessionId}:${TILED_SCOPE}`;
 
   const cached = cache.get(cacheKey);
   if (cached && Date.now() < cached.expiresAt - OBO_CACHE_BUFFER_MS) {
@@ -88,7 +91,7 @@ export async function getOboTokenForUser(username: string): Promise<string> {
   }
 
   // Get a fresh Entra token for this user
-  const entraToken = await getFreshEntraToken(username);
+  const entraToken = await getFreshEntraToken(username, sessionId);
 
   // Exchange for Tiled token
   const oboResult = await exchangeTokenObo(entraToken);
@@ -107,6 +110,19 @@ export async function getOboTokenForUser(username: string): Promise<string> {
  */
 export function clearOboCache(username: string): void {
   const cache = getOboCache();
-  const cacheKey = `${username}:${TILED_SCOPE}`;
+  const cacheKey = `${username}:`;
+  for (const key of cache.keys()) {
+    if (key.startsWith(cacheKey)) {
+      cache.delete(key);
+    }
+  }
+}
+
+/**
+ * Clear a user's OBO cache entry for a specific session.
+ */
+export function clearOboCacheForSession(username: string, sessionId: string): void {
+  const cache = getOboCache();
+  const cacheKey = `${username}:${sessionId}:${TILED_SCOPE}`;
   cache.delete(cacheKey);
 }

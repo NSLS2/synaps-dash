@@ -16,11 +16,22 @@ export async function POST(request: NextRequest) {
 
   let username: string;
   let displayName: string;
+  let sessionId: string;
 
   try {
     const payload = await decodeSessionToken(refreshCookie, 'refresh');
     username = payload.sub;
     displayName = payload.name || username;
+    sessionId = payload.sid || '';
+
+    if (!sessionId) {
+      const response = NextResponse.json(
+        { error: 'invalid session token' },
+        { status: 401 }
+      );
+      clearSessionCookies(response);
+      return response;
+    }
   } catch {
     const response = NextResponse.json({ error: 'invalid refresh token' }, { status: 401 });
     clearSessionCookies(response);
@@ -28,7 +39,7 @@ export async function POST(request: NextRequest) {
   }
 
   // Try to refresh the underlying Entra token
-  const entry = getTokens(username);
+  const entry = await getTokens(username, sessionId);
   if (!entry) {
     const response = NextResponse.json({ error: 'missing entra credentials' }, { status: 401 });
     clearSessionCookies(response);
@@ -38,7 +49,7 @@ export async function POST(request: NextRequest) {
   if (entry.entraRefreshToken) {
     try {
       const refreshed = await refreshEntraAccessToken(entry.entraRefreshToken);
-      setTokens(username, {
+      await setTokens(username, sessionId, {
         entraAccessToken: refreshed.accessToken,
         entraRefreshToken: refreshed.refreshToken,
         storedAt: Date.now(),
@@ -46,7 +57,7 @@ export async function POST(request: NextRequest) {
     } catch (err) {
       console.error('[Entra Refresh] Failed:', err instanceof Error ? err.message : err);
       // Clear stored tokens on refresh failure
-      deleteTokens(username);
+      await deleteTokens(username, sessionId);
       const response = NextResponse.json(
         { error: 'entra refresh failed' },
         { status: 401 }
@@ -56,7 +67,7 @@ export async function POST(request: NextRequest) {
     }
   } else if (isEntraTokenExpiring(entry.entraAccessToken)) {
     // No refresh token available and the access token is expiring/expired.
-    deleteTokens(username);
+    await deleteTokens(username, sessionId);
     const response = NextResponse.json(
       { error: 'entra refresh token missing; re-authentication required' },
       { status: 401 }
@@ -66,7 +77,7 @@ export async function POST(request: NextRequest) {
   }
 
   // Issue new session tokens
-  const newTokens = await issueSessionTokens(username, displayName);
+  const newTokens = await issueSessionTokens(username, displayName, sessionId);
   const response = NextResponse.json({ status: 'ok' });
   setSessionCookies(response, newTokens.accessToken, newTokens.refreshToken);
 

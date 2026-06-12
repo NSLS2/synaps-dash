@@ -3,7 +3,7 @@ import { assertAuthConfig, buildCallbackUrl } from '@/lib/auth/config';
 import { validateAndConsumeOidcFlow, clearOidcFlowCookie } from '@/lib/auth/oidc-flow';
 import { exchangeCodeForUser } from '@/lib/auth/entra';
 import { setTokens } from '@/lib/auth/token-store';
-import { issueSessionTokens } from '@/lib/auth/jwt';
+import { generateSessionId, issueSessionTokens } from '@/lib/auth/jwt';
 import { setSessionCookies } from '@/lib/auth/cookies';
 
 export const runtime = 'nodejs';
@@ -46,15 +46,17 @@ export async function GET(request: NextRequest) {
     const { username, displayName, accessToken, refreshToken } =
       await exchangeCodeForUser(code, redirectUri, codeVerifier, nonce);
 
-    // Store Entra tokens in-memory
-    setTokens(username, {
+    const sessionId = generateSessionId();
+
+    // Store Entra tokens for this app session
+    await setTokens(username, sessionId, {
       entraAccessToken: accessToken,
       entraRefreshToken: refreshToken,
       storedAt: Date.now(),
     });
 
     // Issue app-level session tokens
-    const sessionTokens = await issueSessionTokens(username, displayName);
+    const sessionTokens = await issueSessionTokens(username, displayName, sessionId);
 
     // Redirect to app root with session cookies set
     setSessionCookies(response, sessionTokens.accessToken, sessionTokens.refreshToken);

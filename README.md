@@ -151,6 +151,25 @@ npm run build
 npm start
 ```
 
+## Database Setup
+
+The app uses a single `DATABASE_URL` for persistence. Supported values:
+
+- `file:./data/app.sqlite` (default fallback)
+- `postgres://...` or `postgresql://...`
+
+Initialize schema during deploy:
+
+```bash
+npm run db:migrate
+```
+
+Notes:
+
+- For SQLite, the DB file and parent directory are created automatically if missing.
+- The app also bootstraps the `entra_credentials` table at runtime if not present.
+- Running `npm run db:migrate` is still recommended in deploy automation for fail-fast startup.
+
 ## WebSocket Events
 
 The dashboard listens for `container-child-created` events:

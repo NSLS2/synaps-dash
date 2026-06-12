@@ -22,8 +22,12 @@ export async function GET(
     if (sessionCookie) {
       try {
         const payload = await decodeSessionToken(sessionCookie, 'access');
-        const tiledToken = await getOboTokenForUser(payload.sub);
-        authHeader = `Bearer ${tiledToken}`;
+        if (payload.sid) {
+          const tiledToken = await getOboTokenForUser(payload.sub, payload.sid);
+          authHeader = `Bearer ${tiledToken}`;
+        } else {
+          authHeader = request.headers.get('Authorization');
+        }
       } catch {
         // Cookie invalid/expired - fall through to header-based auth
         authHeader = request.headers.get('Authorization');

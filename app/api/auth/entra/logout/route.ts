@@ -3,10 +3,11 @@ import { ACCESS_COOKIE, REFRESH_COOKIE } from '@/lib/auth/config';
 import { decodeSessionToken } from '@/lib/auth/jwt';
 import { clearSessionCookies } from '@/lib/auth/cookies';
 import { deleteTokens } from '@/lib/auth/token-store';
-import { clearOboCache } from '@/lib/auth/obo';
+import { clearOboCacheForSession } from '@/lib/auth/obo';
 
 export async function POST(request: NextRequest) {
   let username: string | null = null;
+  let sessionId: string | null = null;
 
   // Try to get username from access cookie first, then refresh cookie
   const accessCookie = request.cookies.get(ACCESS_COOKIE)?.value;
@@ -14,6 +15,7 @@ export async function POST(request: NextRequest) {
     try {
       const payload = await decodeSessionToken(accessCookie, 'access');
       username = payload.sub;
+      sessionId = payload.sid || null;
     } catch {
       // Ignore -- try refresh cookie
     }
@@ -25,6 +27,7 @@ export async function POST(request: NextRequest) {
       try {
         const payload = await decodeSessionToken(refreshCookie, 'refresh');
         username = payload.sub;
+        sessionId = payload.sid || null;
       } catch {
         // Ignore
       }
@@ -32,9 +35,9 @@ export async function POST(request: NextRequest) {
   }
 
   // Clean up server-side state
-  if (username) {
-    deleteTokens(username);
-    clearOboCache(username);
+  if (username && sessionId) {
+    await deleteTokens(username, sessionId);
+    clearOboCacheForSession(username, sessionId);
   }
 
   // Clear cookies

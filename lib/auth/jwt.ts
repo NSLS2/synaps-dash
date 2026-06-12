@@ -13,7 +13,15 @@ export interface SessionPayload {
   sub: string; // username (Entra OID)
   name: string; // display name
   type: 'access' | 'refresh';
+  sid?: string; // logical session id (required for new tokens)
   exp: number;
+}
+
+interface SessionTokenClaims {
+  sub: string;
+  name: string;
+  type: SessionPayload['type'];
+  sid: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -33,7 +41,7 @@ function getSecretKey(): Uint8Array {
  * Mirrors: FastAPI app/utils/auth.py create_token()
  */
 export async function createSessionToken(
-  payload: { sub: string; name: string; type: SessionPayload['type'] },
+  payload: SessionTokenClaims,
   lifetime: number
 ): Promise<string> {
   const secret = getSecretKey();
@@ -67,19 +75,27 @@ export async function decodeSessionToken(
 }
 
 /**
+ * Generate a session id shared across access/refresh tokens.
+ */
+export function generateSessionId(): string {
+  return crypto.randomUUID();
+}
+
+/**
  * Issue a pair of session tokens (access + refresh).
  * Mirrors: FastAPI app/utils/auth.py issue_session_tokens()
  */
 export async function issueSessionTokens(
   username: string,
-  displayName: string
+  displayName: string,
+  sessionId: string
 ): Promise<{ accessToken: string; refreshToken: string }> {
   const accessToken = await createSessionToken(
-    { sub: username, name: displayName, type: 'access' },
+    { sub: username, name: displayName, type: 'access', sid: sessionId },
     ACCESS_TOKEN_LIFETIME
   );
   const refreshToken = await createSessionToken(
-    { sub: username, name: displayName, type: 'refresh' },
+    { sub: username, name: displayName, type: 'refresh', sid: sessionId },
     REFRESH_TOKEN_LIFETIME
   );
   return { accessToken, refreshToken };

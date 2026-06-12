@@ -11,8 +11,14 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'not authenticated' }, { status: 401 });
   }
 
+  if (!session.sessionId) {
+    const response = NextResponse.json({ error: 'not authenticated' }, { status: 401 });
+    clearSessionCookies(response);
+    return response;
+  }
+
   // Ensure server-side Entra credentials still exist
-  const entry = getTokens(session.username);
+  const entry = await getTokens(session.username, session.sessionId);
   if (!entry) {
     const response = NextResponse.json({ error: 'not authenticated' }, { status: 401 });
     clearSessionCookies(response);
@@ -21,7 +27,7 @@ export async function GET(request: NextRequest) {
 
   // If Entra access is expiring and cannot be refreshed, force re-authentication
   if (!entry.entraRefreshToken && isEntraTokenExpiring(entry.entraAccessToken)) {
-    deleteTokens(session.username);
+    await deleteTokens(session.username, session.sessionId);
     const response = NextResponse.json({ error: 'not authenticated' }, { status: 401 });
     clearSessionCookies(response);
     return response;
@@ -37,7 +43,11 @@ export async function GET(request: NextRequest) {
   }
 
   // Access expired but refresh is valid -- reissue session tokens
-  const newTokens = await issueSessionTokens(session.username, session.displayName);
+  const newTokens = await issueSessionTokens(
+    session.username,
+    session.displayName,
+    session.sessionId
+  );
   const response = NextResponse.json({
     username: session.username,
     display_name: session.displayName,

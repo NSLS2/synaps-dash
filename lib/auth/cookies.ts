@@ -56,6 +56,7 @@ export async function getSessionFromRequest(
 ): Promise<{
   username: string;
   displayName: string;
+  sessionId: string | null;
   source: 'access' | 'refresh';
 } | null> {
   // Try access token first
@@ -66,6 +67,7 @@ export async function getSessionFromRequest(
       return {
         username: payload.sub,
         displayName: payload.name || payload.sub,
+        sessionId: payload.sid || null,
         source: 'access',
       };
     } catch {
@@ -81,6 +83,7 @@ export async function getSessionFromRequest(
       return {
         username: payload.sub,
         displayName: payload.name || payload.sub,
+        sessionId: payload.sid || null,
         source: 'refresh',
       };
     } catch {

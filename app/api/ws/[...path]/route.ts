@@ -65,8 +65,7 @@ async function revokeApiKey(accessToken: string, firstEight: string): Promise<vo
 
 export function SOCKET(
   client: import('ws').WebSocket,
-  request: import('http').IncomingMessage,
-  server: import('ws').WebSocketServer
+  request: import('http').IncomingMessage
 ) {
   const url = new URL(request.url || '', `http://${request.headers.host}`);
 
@@ -97,7 +96,10 @@ export function SOCKET(
         if (accessCookieMatch) {
           const accessCookieValue = decodeURIComponent(accessCookieMatch[1]);
           const accessPayload = await decodeSessionToken(accessCookieValue, 'access');
-          return await getOboTokenForUser(accessPayload.sub);
+          if (accessPayload.sid) {
+            return await getOboTokenForUser(accessPayload.sub, accessPayload.sid);
+          }
+          return null;
         }
       } catch {
         // Access cookie invalid/expired -- try refresh cookie below
@@ -107,7 +109,10 @@ export function SOCKET(
         if (refreshCookieMatch) {
           const refreshCookieValue = decodeURIComponent(refreshCookieMatch[1]);
           const refreshPayload = await decodeSessionToken(refreshCookieValue, 'refresh');
-          return await getOboTokenForUser(refreshPayload.sub);
+          if (refreshPayload.sid) {
+            return await getOboTokenForUser(refreshPayload.sub, refreshPayload.sid);
+          }
+          return null;
         }
       } catch {
         return null;
