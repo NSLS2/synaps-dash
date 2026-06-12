@@ -11,7 +11,9 @@ export async function POST(request: NextRequest) {
   const refreshCookie = request.cookies.get(REFRESH_COOKIE)?.value;
 
   if (!refreshCookie) {
-    return NextResponse.json({ error: 'missing refresh token' }, { status: 401 });
+    const response = NextResponse.json({ error: 'missing refresh token' }, { status: 401 });
+    clearSessionCookies(response);
+    return response;
   }
 
   let username: string;

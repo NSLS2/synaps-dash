@@ -2,12 +2,9 @@ import 'server-only';
 import fs from 'node:fs';
 import path from 'node:path';
 import knex, { Knex } from 'knex';
+import { getDatabaseUrl, normalizeSqlitePath } from './url-utils.mjs';
 
 const globalKey = '__appDbClient';
-
-function getDatabaseUrl(): string {
-  return process.env.DATABASE_URL?.trim() || 'file:./data/app.sqlite';
-}
 
 function createSqliteClient(databaseUrl: string): Knex {
   const raw = databaseUrl.slice('file:'.length);
@@ -25,17 +22,6 @@ function createSqliteClient(databaseUrl: string): Knex {
     },
     useNullAsDefault: true,
   });
-}
-
-function normalizeSqlitePath(rawPath: string): string {
-  if (rawPath.startsWith('//')) {
-    // file:// style absolute paths become //abs/path after stripping `file:`
-    return path.normalize(rawPath);
-  }
-  if (path.isAbsolute(rawPath)) {
-    return rawPath;
-  }
-  return path.resolve(/*turbopackIgnore: true*/ process.cwd(), rawPath);
 }
 
 function createDbClient(): Knex {

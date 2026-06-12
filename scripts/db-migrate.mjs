@@ -1,26 +1,10 @@
 import fs from 'node:fs';
-import path from 'node:path';
 import knex from 'knex';
-
-function getDatabaseUrl() {
-  return (process.env.DATABASE_URL || '').trim() || 'file:./data/app.sqlite';
-}
-
-function normalizeSqlitePath(rawPath) {
-  if (rawPath.startsWith('//')) {
-    return path.normalize(rawPath);
-  }
-  if (path.isAbsolute(rawPath)) {
-    return rawPath;
-  }
-  return path.resolve(process.cwd(), rawPath);
-}
+import { getDatabaseUrl, normalizeSqlitePath } from '../lib/db/url-utils.mjs';
 
 function createSqliteClient(databaseUrl) {
   const raw = databaseUrl.slice('file:'.length);
-  const filename = raw
-    ? normalizeSqlitePath(raw)
-    : path.resolve(process.cwd(), 'data/app.sqlite');
+  const filename = normalizeSqlitePath(raw || './data/app.sqlite');
 
   fs.mkdirSync(path.dirname(filename), { recursive: true });
 
@@ -51,23 +35,51 @@ function createDbClient() {
   );
 }
 
+function isTableAlreadyExistsError(err) {
+  if (!err || typeof err !== 'object') {
+    return false;
+  }
+
+  if (err.code === '42P07') {
+    return true;
+  }
+
+  if (typeof err.message === 'string') {
+    const lower = err.message.toLowerCase();
+    return (
+      lower.includes('already exists') &&
+      (lower.includes('table') || lower.includes('relation'))
+    );
+  }
+
+  return false;
+}
+
 async function migrate(db) {
   const tableName = 'entra_credentials';
   const exists = await db.schema.hasTable(tableName);
   if (!exists) {
-    await db.schema.createTable(tableName, (table) => {
-      table.string('username').notNullable();
-      table.string('session_id').notNullable();
-      table.text('entra_access_token').notNullable();
-      table.text('entra_refresh_token').nullable();
-      table.bigInteger('stored_at').notNullable();
-      table.bigInteger('updated_at').notNullable();
-      table.bigInteger('last_used_at').notNullable();
-      table.primary(['username', 'session_id']);
-      table.index(['updated_at']);
-      table.index(['last_used_at']);
-    });
-    console.log('[db:migrate] Created table:', tableName);
+    try {
+      await db.schema.createTable(tableName, (table) => {
+        table.string('username').notNullable();
+        table.string('session_id').notNullable();
+        table.text('entra_access_token').notNullable();
+        table.text('entra_refresh_token').nullable();
+        table.bigInteger('stored_at').notNullable();
+        table.bigInteger('updated_at').notNullable();
+        table.bigInteger('last_used_at').notNullable();
+        table.primary(['username', 'session_id']);
+        table.index(['updated_at']);
+        table.index(['last_used_at']);
+      });
+      console.log('[db:migrate] Created table:', tableName);
+    } catch (err) {
+      if (isTableAlreadyExistsError(err)) {
+        console.log('[db:migrate] Table already exists (race-safe):', tableName);
+      } else {
+        throw err;
+      }
+    }
   } else {
     console.log('[db:migrate] Table already exists:', tableName);
   }

@@ -31,6 +31,28 @@ function maxRows(): number {
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 10_000;
 }
 
+function isTableAlreadyExistsError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') {
+    return false;
+  }
+
+  const code = (err as { code?: unknown }).code;
+  if (code === '42P07') {
+    return true;
+  }
+
+  const message = (err as { message?: unknown }).message;
+  if (typeof message === 'string') {
+    const lower = message.toLowerCase();
+    return (
+      lower.includes('already exists') &&
+      (lower.includes('table') || lower.includes('relation'))
+    );
+  }
+
+  return false;
+}
+
 async function ensureSchema(): Promise<void> {
   const g = globalThis as Record<string, unknown>;
   if (!g[initKey]) {
@@ -38,18 +60,24 @@ async function ensureSchema(): Promise<void> {
       const db = getDbClient();
       const exists = await db.schema.hasTable(TABLE_NAME);
       if (!exists) {
-        await db.schema.createTable(TABLE_NAME, (table) => {
-          table.string('username').notNullable();
-          table.string('session_id').notNullable();
-          table.text('entra_access_token').notNullable();
-          table.text('entra_refresh_token').nullable();
-          table.bigInteger('stored_at').notNullable();
-          table.bigInteger('updated_at').notNullable();
-          table.bigInteger('last_used_at').notNullable();
-          table.primary(['username', 'session_id']);
-          table.index(['updated_at']);
-          table.index(['last_used_at']);
-        });
+        try {
+          await db.schema.createTable(TABLE_NAME, (table) => {
+            table.string('username').notNullable();
+            table.string('session_id').notNullable();
+            table.text('entra_access_token').notNullable();
+            table.text('entra_refresh_token').nullable();
+            table.bigInteger('stored_at').notNullable();
+            table.bigInteger('updated_at').notNullable();
+            table.bigInteger('last_used_at').notNullable();
+            table.primary(['username', 'session_id']);
+            table.index(['updated_at']);
+            table.index(['last_used_at']);
+          });
+        } catch (err) {
+          if (!isTableAlreadyExistsError(err)) {
+            throw err;
+          }
+        }
       }
     })();
   }
