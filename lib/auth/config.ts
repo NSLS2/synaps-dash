@@ -51,6 +51,7 @@ export function entraUserScope(): string {
  * Throws at startup/first-use if required server env vars are missing.
  */
 export function assertAuthConfig(): void {
+  const isDevelopment = process.env.NODE_ENV === 'development';
   const missing: string[] = [];
   if (!TENANT_ID) missing.push('ENTRA_TENANT_ID');
   if (!CLIENT_ID) missing.push('ENTRA_CLIENT_ID');
@@ -65,6 +66,12 @@ export function assertAuthConfig(): void {
   if (SESSION_SECRET.length < 32) {
     throw new Error(
       '[auth/config] SESSION_SECRET must be at least 32 characters'
+    );
+  }
+
+  if (!isDevelopment && REDIRECT_ORIGIN_ALLOWLIST.length === 0 && !APP_BASE_URL) {
+    throw new Error(
+      '[auth/config] In non-development environments, configure APP_BASE_URL or ENTRA_REDIRECT_ORIGIN_ALLOWLIST'
     );
   }
 }
@@ -83,10 +90,11 @@ export function assertAuthConfig(): void {
  */
 export function buildCallbackUrl(request: NextRequest): string {
   const origin = resolveOrigin(request);
-  return `${origin}/api/auth/entra/callback`;
+  return `${origin}/auth/code`;
 }
 
 function resolveOrigin(request: NextRequest): string {
+  const isDevelopment = process.env.NODE_ENV === 'development';
   const forwardedHost = request.headers.get('x-forwarded-host')?.split(',')[0]?.trim();
   const forwardedProtoRaw = request
     .headers.get('x-forwarded-proto')
@@ -98,6 +106,7 @@ function resolveOrigin(request: NextRequest): string {
       ? forwardedProtoRaw
       : 'https';
   const host = forwardedHost || request.headers.get('host')?.split(',')[0]?.trim();
+  let requestOrigin: string | null = null;
 
   if (host) {
     const requestProto = request.nextUrl.protocol?.replace(':', '').toLowerCase();
@@ -107,22 +116,60 @@ function resolveOrigin(request: NextRequest): string {
         : requestProto === 'http' || requestProto === 'https'
           ? requestProto
           : 'https';
-    const origin = `${proto}://${host}`;
+    requestOrigin = `${proto}://${host}`;
 
-    // If allowlist is configured, validate
-    if (REDIRECT_ORIGIN_ALLOWLIST.length > 0) {
-      if (REDIRECT_ORIGIN_ALLOWLIST.includes(origin)) {
-        return origin;
+    if (isDevelopment) {
+      // In development, allow request-derived origin unless an allowlist is set.
+      if (REDIRECT_ORIGIN_ALLOWLIST.length === 0) {
+        return requestOrigin;
+      }
+
+      if (REDIRECT_ORIGIN_ALLOWLIST.includes(requestOrigin)) {
+        return requestOrigin;
       }
       // Not in allowlist - fall through to APP_BASE_URL
-    } else {
-      return origin;
     }
+  }
+
+  if (isDevelopment) {
+    if (APP_BASE_URL) {
+      return APP_BASE_URL;
+    }
+    return 'http://localhost:3000';
+  }
+
+  // Non-development hardening:
+  // - If allowlist exists, request-derived origin must be in allowlist.
+  // - If allowlist is empty, do not trust request-derived headers.
+  if (REDIRECT_ORIGIN_ALLOWLIST.length > 0) {
+    if (requestOrigin) {
+      if (REDIRECT_ORIGIN_ALLOWLIST.includes(requestOrigin)) {
+        return requestOrigin;
+      }
+      throw new Error(
+        `[auth/config] Derived redirect origin '${requestOrigin}' is not in ENTRA_REDIRECT_ORIGIN_ALLOWLIST`
+      );
+    }
+
+    if (APP_BASE_URL) {
+      if (REDIRECT_ORIGIN_ALLOWLIST.includes(APP_BASE_URL)) {
+        return APP_BASE_URL;
+      }
+      throw new Error(
+        `[auth/config] APP_BASE_URL '${APP_BASE_URL}' must be included in ENTRA_REDIRECT_ORIGIN_ALLOWLIST`
+      );
+    }
+
+    throw new Error(
+      '[auth/config] Unable to derive request origin and APP_BASE_URL is not configured'
+    );
   }
 
   if (APP_BASE_URL) {
     return APP_BASE_URL;
   }
 
-  return 'http://localhost:3000';
+  throw new Error(
+    '[auth/config] In non-development environments, APP_BASE_URL is required when ENTRA_REDIRECT_ORIGIN_ALLOWLIST is empty'
+  );
 }
