@@ -35,6 +35,23 @@ interface AuthContextValue extends AuthState {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+function toAppSessionUser(
+  tiledUser: TiledUser | null,
+  fallbackName: string = 'user'
+): AppSessionUser | null {
+  if (!tiledUser) {
+    return null;
+  }
+
+  const identity = tiledUser.identities?.[0]?.id || fallbackName;
+  return {
+    username: identity,
+    displayName: identity,
+    source: 'tiled',
+    tiledUser,
+  };
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<AuthState>({
     user: null,
@@ -75,7 +92,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (apiKey) {
         const user = await getCurrentUser(apiKey);
         setState({
-          user: user ? { username: user.identities?.[0]?.id || 'user', displayName: user.identities?.[0]?.id || 'user', source: 'tiled', tiledUser: user } : null,
+          user: toAppSessionUser(user),
           isAuthenticated: !!user,
           isLoading: false,
           accessToken: apiKey,
@@ -125,7 +142,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const tiledUser = await getCurrentUser(currentToken);
 
     setState({
-      user: tiledUser ? { username: tiledUser.identities?.[0]?.id || 'user', displayName: tiledUser.identities?.[0]?.id || 'user', source: 'tiled', tiledUser } : null,
+      user: toAppSessionUser(tiledUser),
       isAuthenticated: !!tiledUser,
       isLoading: false,
       accessToken: currentToken,
@@ -248,7 +265,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const tiledUser = await getCurrentUser(tokens.access_token);
 
       setState({
-        user: tiledUser ? { username: tiledUser.identities?.[0]?.id || username, displayName: tiledUser.identities?.[0]?.id || username, source: 'tiled', tiledUser } : null,
+        user: toAppSessionUser(tiledUser, username),
         isAuthenticated: true,
         isLoading: false,
         accessToken: tokens.access_token,
@@ -271,7 +288,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const tiledUser = await validateApiKey(apiKey);
 
       setState({
-        user: { username: tiledUser.identities?.[0]?.id || 'user', displayName: tiledUser.identities?.[0]?.id || 'user', source: 'tiled', tiledUser },
+        user: toAppSessionUser(tiledUser),
         isAuthenticated: true,
         isLoading: false,
         accessToken: apiKey,
