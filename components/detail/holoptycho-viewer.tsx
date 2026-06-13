@@ -96,6 +96,11 @@ interface TiledImageTileProps {
   // Called whenever a fresh image is loaded (i.e. ETag changed). Lets the parent
   // update timestamps and metadata-derived state.
   onChanged?: () => void;
+  // Crop the rendered array to its meaningful (non-background) region before
+  // painting. For sparse reconstructions (the iterative object/phase, which
+  // cover a small strip of a canvas sized for the full scan) so they fill the
+  // panel. Off for full-frame images (probe, detector).
+  autoCrop?: boolean;
 }
 
 function TiledImageTile({
@@ -105,6 +110,7 @@ function TiledImageTile({
   slice,
   pollIntervalMs,
   onChanged,
+  autoCrop = false,
 }: TiledImageTileProps) {
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -194,7 +200,7 @@ function TiledImageTile({
           }
           return;
         }
-        paintFloatArrayToCanvas(canvas, data, w, h);
+        paintFloatArrayToCanvas(canvas, data, w, h, autoCrop);
         if (cancelled) return;
         setHasLoadedOnce(true);
         setError(null);
@@ -210,7 +216,7 @@ function TiledImageTile({
     }
     const handle = setInterval(tick, pollIntervalMs);
     return () => { cancelled = true; clearInterval(handle); };
-  }, [path, slice, pollIntervalMs]);
+  }, [path, slice, pollIntervalMs, autoCrop]);
 
   return (
     <div className="flex flex-col">
@@ -382,6 +388,7 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
               slice={0}
               pollIntervalMs={iterativePollMs}
               onChanged={handleObjectChanged}
+              autoCrop
             />
             <TiledImageTile
               title={`${sources.iterativeSource === 'live' ? 'Iterative' : 'Final'} object phase`}
@@ -389,6 +396,7 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
               path={objectPath}
               slice={1}
               pollIntervalMs={iterativePollMs}
+              autoCrop
             />
           </>
         )}

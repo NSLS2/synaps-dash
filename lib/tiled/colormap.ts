@@ -58,6 +58,72 @@ function percentile(
   return vals[idx];
 }
 
+type NumArray = Float32Array | Float64Array | Uint16Array | Uint8Array;
+
+// Bounding box of the "meaningful" (non-background) region of an image, or
+// null if the image fills its frame (so cropping would be a no-op) or is
+// empty. Used to crop a sparse reconstruction — e.g. a streaming iterative
+// object that occupies a small off-center strip of a canvas sized for the
+// full scan — down to the region that actually carries signal, so it fills
+// the display panel instead of sitting in a sea of empty background.
+function meaningfulBBox(
+  data: NumArray,
+  width: number,
+  height: number,
+): { x0: number; y0: number; x1: number; y1: number } | null {
+  // Background = median of the finite border-ring pixels (the frame edge is
+  // almost always background for a sparse recon; for a full-frame image it's
+  // just a representative value and the coverage guard below bails anyway).
+  const border: number[] = [];
+  for (let x = 0; x < width; x++) {
+    const t = data[x];
+    const b = data[(height - 1) * width + x];
+    if (Number.isFinite(t)) border.push(t);
+    if (Number.isFinite(b)) border.push(b);
+  }
+  for (let y = 0; y < height; y++) {
+    const l = data[y * width];
+    const r = data[y * width + width - 1];
+    if (Number.isFinite(l)) border.push(l);
+    if (Number.isFinite(r)) border.push(r);
+  }
+  let bg = 0;
+  if (border.length) {
+    border.sort((a, b) => a - b);
+    bg = border[border.length >> 1];
+  }
+  // A pixel is "meaningful" if it's finite and deviates from background by
+  // more than 2% of the data's robust (p1..p99) range.
+  const p1 = percentile(data, 1);
+  const p99 = percentile(data, 99);
+  const scale = Number.isFinite(p99) && Number.isFinite(p1) && p99 > p1 ? p99 - p1 : 1;
+  const thr = 0.02 * scale;
+
+  let minX = width, minY = height, maxX = -1, maxY = -1, count = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const v = data[y * width + x];
+      if (!Number.isFinite(v) || Math.abs(v - bg) <= thr) continue;
+      count++;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+  }
+  if (maxX < minX || maxY < minY) return null;        // nothing meaningful
+  if (count / (width * height) > 0.85) return null;    // ~full frame — no crop
+  // Add a small margin so the recon isn't flush against the panel edge.
+  const mx = Math.round((maxX - minX + 1) * 0.04);
+  const my = Math.round((maxY - minY + 1) * 0.04);
+  return {
+    x0: Math.max(0, minX - mx),
+    y0: Math.max(0, minY - my),
+    x1: Math.min(width - 1, maxX + mx),
+    y1: Math.min(height - 1, maxY + my),
+  };
+}
+
 // Paint a 2D numeric array onto `canvas` with viridis. Normalises contrast
 // using 1st/99th percentile of the central 50% of the image (matching offline
 // analysis behaviour). NaN pixels are written with alpha=0 so the underlying
@@ -67,12 +133,36 @@ function percentile(
 // Float arrays carry NaN through; integer arrays (e.g. uint16 detector
 // frames) are always finite, so the NaN check is a no-op for them. One
 // signature handles both so callers don't have to fork on dtype.
+//
+// `autoCrop` first trims the array to its meaningful (non-background) bounding
+// box. Use it for sparse reconstructions (the iterative object/phase) so a
+// recon covering a small strip of a full-scan-sized canvas fills the panel —
+// and so the central-50% normalisation window lands on real signal instead of
+// empty background. Leave it off for full-frame images (probe, detector).
 export function paintFloatArrayToCanvas(
   canvas: HTMLCanvasElement,
-  data: Float32Array | Float64Array | Uint16Array | Uint8Array,
+  data: NumArray,
   width: number,
   height: number,
+  autoCrop = false,
 ): void {
+  if (autoCrop) {
+    const bb = meaningfulBBox(data, width, height);
+    if (bb) {
+      const cw = bb.x1 - bb.x0 + 1;
+      const ch = bb.y1 - bb.y0 + 1;
+      const Ctor = data.constructor as { new (n: number): NumArray };
+      const cropped = new Ctor(cw * ch);
+      for (let y = 0; y < ch; y++) {
+        for (let x = 0; x < cw; x++) {
+          cropped[y * cw + x] = data[(bb.y0 + y) * width + (bb.x0 + x)];
+        }
+      }
+      data = cropped;
+      width = cw;
+      height = ch;
+    }
+  }
   // Build a mask for the central 50% of the image (middle half in each dim)
   const y0 = Math.floor(height / 4);
   const y1 = Math.floor((3 * height) / 4);
