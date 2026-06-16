@@ -57,13 +57,19 @@ function notifyAuthError(): void {
 
 // Get a valid auth header, refreshing token if needed
 async function getValidAuthHeader(): Promise<string | null> {
+  // For Entra sessions, auth is handled server-side via cookies
+  // The browser automatically sends cookies; no Authorization header needed
+  const authType = getAuthType();
+  if (authType === 'entra') {
+    return null;
+  }
+
   const token = await getValidAccessToken();
   if (!token) {
     console.log('[Client] No valid token available');
     return null;
   }
 
-  const authType = getAuthType();
   return authType === 'apikey' ? `Apikey ${token}` : `Bearer ${token}`;
 }
 
@@ -79,19 +85,41 @@ async function fetchWithAuth(url: string, options: RequestInit = {}, isRetry = f
 
   // On 401, try to refresh and retry once
   if (response.status === 401 && !isRetry) {
-    console.log('[Client] Got 401, attempting token refresh and retry...');
-    const { refreshAccessToken } = await import('./auth');
-    const refreshed = await refreshAccessToken();
+    const currentAuthType = getAuthType();
 
-    if (refreshed) {
-      console.log('[Client] Token refreshed, retrying request...');
-      return fetchWithAuth(url, options, true);
+    if (currentAuthType === 'entra') {
+      // For Entra sessions, call the server-side refresh endpoint
+      console.log('[Client] Got 401 in Entra mode, calling server refresh...');
+      try {
+        const refreshResponse = await fetch('/api/auth/entra/refresh', { method: 'POST' });
+        if (refreshResponse.ok) {
+          console.log('[Client] Entra session refreshed, retrying request...');
+          return fetchWithAuth(url, options, true);
+        }
+      } catch {
+        // Refresh failed
+      }
+      // Refresh failed - notify auth error
+      console.log('[Client] Entra refresh failed, logging out');
+      const { clearEntraAuthMarker } = await import('./auth');
+      clearEntraAuthMarker();
+      notifyAuthError();
+    } else {
+      // For Tiled token auth, try client-side refresh
+      console.log('[Client] Got 401, attempting token refresh and retry...');
+      const { refreshAccessToken } = await import('./auth');
+      const refreshed = await refreshAccessToken();
+
+      if (refreshed) {
+        console.log('[Client] Token refreshed, retrying request...');
+        return fetchWithAuth(url, options, true);
+      }
+
+      // Refresh failed - clear tokens and notify
+      console.log('[Client] Token refresh failed, logging out');
+      clearTokens();
+      notifyAuthError();
     }
-
-    // Refresh failed - clear tokens and notify
-    console.log('[Client] Token refresh failed, logging out');
-    clearTokens();
-    notifyAuthError();
   }
 
   return response;

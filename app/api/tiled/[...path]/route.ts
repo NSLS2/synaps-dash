@@ -1,4 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { ACCESS_COOKIE } from '@/lib/auth/config';
+import { decodeSessionToken } from '@/lib/auth/jwt';
+import { getOboTokenForUser } from '@/lib/auth/obo';
 
 const TILED_URL = process.env.NEXT_PUBLIC_TILED_URL || 'https://tiled.nsls2.bnl.gov';
 
@@ -12,7 +15,27 @@ export async function GET(
     const searchParams = request.nextUrl.searchParams.toString();
     const url = `${TILED_URL}/api/v1/${tiledPath}${searchParams ? `?${searchParams}` : ''}`;
 
-    const authHeader = request.headers.get('Authorization');
+    // Determine auth: cookie-session (Entra/OBO) or pass-through (Tiled token/API key)
+    let authHeader: string | null = null;
+
+    const sessionCookie = request.cookies.get(ACCESS_COOKIE)?.value;
+    if (sessionCookie) {
+      try {
+        const payload = await decodeSessionToken(sessionCookie, 'access');
+        if (payload.sid) {
+          const tiledToken = await getOboTokenForUser(payload.sub, payload.sid);
+          authHeader = `Bearer ${tiledToken}`;
+        } else {
+          authHeader = request.headers.get('Authorization');
+        }
+      } catch {
+        // Cookie invalid/expired - fall through to header-based auth
+        authHeader = request.headers.get('Authorization');
+      }
+    } else {
+      authHeader = request.headers.get('Authorization');
+    }
+
     const ifNoneMatch = request.headers.get('If-None-Match');
 
     const headers: HeadersInit = {};

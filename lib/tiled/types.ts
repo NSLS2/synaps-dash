@@ -15,6 +15,16 @@ export interface TiledUser {
   roles?: string[];
 }
 
+/**
+ * Unified user identity across Tiled and Entra sessions.
+ */
+export interface AppSessionUser {
+  username: string;
+  displayName: string;
+  source: 'entra' | 'tiled';
+  tiledUser?: TiledUser;
+}
+
 export interface TiledSearchResponse<T = TiledNode> {
   data: T[];
   links: {

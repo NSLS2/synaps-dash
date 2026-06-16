@@ -12,7 +12,7 @@ type AuthMode = 'password' | 'apikey';
 
 export default function LoginPage() {
   const router = useRouter();
-  const { login, loginWithApiKey, isLoading } = useAuth();
+  const { login, loginWithApiKey, loginWithEntra, isLoading } = useAuth();
   const [mode, setMode] = useState<AuthMode>('password');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -77,6 +77,29 @@ export default function LoginPage() {
             <p className="text-sm text-text-secondary">
               Access the pipeline monitoring dashboard
             </p>
+          </div>
+
+          {/* Microsoft SSO */}
+          <Button
+            type="button"
+            onClick={() => loginWithEntra()}
+            disabled={isLoading}
+            className="w-full h-10 bg-[#2f2f2f] text-white hover:bg-[#1a1a1a] font-medium rounded-lg gap-2.5 mb-4"
+          >
+            <svg className="w-4 h-4" viewBox="0 0 21 21" fill="none">
+              <rect x="1" y="1" width="9" height="9" fill="#F25022" />
+              <rect x="11" y="1" width="9" height="9" fill="#7FBA00" />
+              <rect x="1" y="11" width="9" height="9" fill="#00A4EF" />
+              <rect x="11" y="11" width="9" height="9" fill="#FFB900" />
+            </svg>
+            Sign in with Microsoft
+          </Button>
+
+          {/* Divider */}
+          <div className="flex items-center gap-3 mb-4">
+            <div className="flex-1 h-px bg-border-subtle" />
+            <span className="text-[11px] text-text-tertiary uppercase tracking-wider">or</span>
+            <div className="flex-1 h-px bg-border-subtle" />
           </div>
 
           {/* Mode Toggle */}

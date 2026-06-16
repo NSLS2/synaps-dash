@@ -151,6 +151,32 @@ npm run build
 npm start
 ```
 
+## Database Setup
+
+The app uses a single `DATABASE_URL` for persistence. Supported values:
+
+- `file:./data/app.sqlite` (default fallback)
+- `postgres://...` or `postgresql://...`
+
+Security note:
+
+- Persisted Entra credentials are encrypted at the application layer.
+- You must provide `ENTRA_TOKEN_ENCRYPTION_KEY` (base64-encoded 32 bytes).
+- Generate with: `openssl rand -base64 32`
+- Keep this key stable across restarts/deploys, or stored credentials become unreadable.
+
+Initialize schema during deploy:
+
+```bash
+npm run db:migrate
+```
+
+Notes:
+
+- For SQLite, the DB file and parent directory are created automatically if missing.
+- The app also bootstraps the `entra_credentials` table at runtime if not present.
+- Running `npm run db:migrate` is still recommended in deploy automation for fail-fast startup.
+
 ## WebSocket Events
 
 The dashboard listens for `container-child-created` events:

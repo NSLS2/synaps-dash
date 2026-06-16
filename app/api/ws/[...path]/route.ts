@@ -1,4 +1,7 @@
 import { WebSocket as NodeWebSocket } from 'ws';
+import { ACCESS_COOKIE, REFRESH_COOKIE } from '@/lib/auth/config';
+import { decodeSessionToken } from '@/lib/auth/jwt';
+import { getOboTokenForUser } from '@/lib/auth/obo';
 
 const TILED_URL = process.env.NEXT_PUBLIC_TILED_URL || 'https://tiled.nsls2.bnl.gov';
 
@@ -62,8 +65,7 @@ async function revokeApiKey(accessToken: string, firstEight: string): Promise<vo
 
 export function SOCKET(
   client: import('ws').WebSocket,
-  request: import('http').IncomingMessage,
-  server: import('ws').WebSocketServer
+  request: import('http').IncomingMessage
 ) {
   const url = new URL(request.url || '', `http://${request.headers.host}`);
 
@@ -74,6 +76,51 @@ export function SOCKET(
   // Get auth token from query params
   const token = url.searchParams.get('token');
   const authType = url.searchParams.get('auth_type') || 'token';
+
+  // Try cookie-based auth (Entra/OBO) first
+  let effectiveToken: string | null = token;
+  let effectiveAuthType: string = authType;
+  let cookieAuthPromise: Promise<string | null> | null = null;
+
+  const cookieHeader = request.headers.cookie || '';
+  const accessCookieMatch = cookieHeader.match(
+    new RegExp(`(?:^|;\\s*)${ACCESS_COOKIE}=([^;]+)`)
+  );
+  const refreshCookieMatch = cookieHeader.match(
+    new RegExp(`(?:^|;\\s*)${REFRESH_COOKIE}=([^;]+)`)
+  );
+
+  if (accessCookieMatch || refreshCookieMatch) {
+    cookieAuthPromise = (async () => {
+      try {
+        if (accessCookieMatch) {
+          const accessCookieValue = decodeURIComponent(accessCookieMatch[1]);
+          const accessPayload = await decodeSessionToken(accessCookieValue, 'access');
+          if (accessPayload.sid) {
+            return await getOboTokenForUser(accessPayload.sub, accessPayload.sid);
+          }
+          return null;
+        }
+      } catch {
+        // Access cookie invalid/expired -- try refresh cookie below
+      }
+
+      try {
+        if (refreshCookieMatch) {
+          const refreshCookieValue = decodeURIComponent(refreshCookieMatch[1]);
+          const refreshPayload = await decodeSessionToken(refreshCookieValue, 'refresh');
+          if (refreshPayload.sid) {
+            return await getOboTokenForUser(refreshPayload.sub, refreshPayload.sid);
+          }
+          return null;
+        }
+      } catch {
+        return null;
+      }
+
+      return null;
+    })();
+  }
 
   // Build Tiled WebSocket URL with required params
   const wsUrl = TILED_URL.replace('https://', 'wss://').replace('http://', 'ws://');
@@ -88,22 +135,31 @@ export function SOCKET(
   const tiledWsUrl = `${wsUrl}/api/v1/stream/single/${tiledPath}?${tiledParams.toString()}`;
 
   console.log('[WS Proxy] Client connected, proxying to:', tiledWsUrl);
-  console.log('[WS Proxy] Auth type:', authType, 'Token present:', !!token);
+  console.log('[WS Proxy] Auth type:', effectiveAuthType, 'Token present:', !!effectiveToken, 'Cookie auth:', !!cookieAuthPromise);
 
   // Connect to Tiled - need to handle async API key creation
   const connectToTiled = async () => {
+    // Resolve effective token from cookie auth if applicable
+    if (cookieAuthPromise) {
+      const oboToken = await cookieAuthPromise;
+      if (oboToken) {
+        effectiveToken = oboToken;
+        effectiveAuthType = 'token';
+      }
+    }
+
     let apiKey: string | null = null;
     let keyInfo: { secret: string; firstEight: string } | null = null;
 
-    if (token) {
-      if (authType === 'apikey') {
+    if (effectiveToken) {
+      if (effectiveAuthType === 'apikey') {
         // Already have an API key, use it directly
-        apiKey = token;
+        apiKey = effectiveToken;
         console.log('[WS Proxy] Using provided API key');
       } else {
         // Have a Bearer token, create a short-lived API key
         console.log('[WS Proxy] Creating API key from access token...');
-        keyInfo = await createApiKey(token);
+        keyInfo = await createApiKey(effectiveToken);
         if (!keyInfo) {
           client.send(JSON.stringify({ type: 'proxy-error', error: 'Failed to create API key' }));
           client.close(1011, 'Auth error');
@@ -123,9 +179,9 @@ export function SOCKET(
     // Track if we've revoked the key to avoid double-revoke
     let keyRevoked = false;
     const revokeKeyOnce = () => {
-      if (!keyRevoked && keyInfo && token) {
+      if (!keyRevoked && keyInfo && effectiveToken) {
         keyRevoked = true;
-        revokeApiKey(token, keyInfo.firstEight);
+        revokeApiKey(effectiveToken, keyInfo.firstEight);
       }
     };
 
