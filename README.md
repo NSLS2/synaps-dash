@@ -151,6 +151,76 @@ npm run build
 npm start
 ```
 
+## Container / Docker
+
+The app ships as a container image. The `Dockerfile` is a multi-stage build that
+produces Next.js [standalone output](https://nextjs.org/docs/app/api-reference/config/next-config-js/output)
+and runs it as a slim, non-root image (`node server.js` on port `3000`).
+
+### Build & run locally
+
+```bash
+# Build
+docker build -t synaps-dash .
+
+# Run (SQLite fallback, ephemeral)
+docker run --rm -p 3000:3000 \
+  -e SESSION_SECRET="$(openssl rand -hex 32)" \
+  -e ENTRA_TOKEN_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
+  -e ENTRA_TENANT_ID=... \
+  -e ENTRA_CLIENT_ID=... \
+  -e ENTRA_CLIENT_SECRET=... \
+  -e TILED_SCOPE="api://<client-id>/access_as_user" \
+  synaps-dash
+```
+
+### Image registry (GHCR)
+
+A GitHub Actions workflow (`.github/workflows/build.yml`) builds the image and pushes
+it to the GitHub Container Registry on every push to `main` (and via manual
+`workflow_dispatch`):
+
+```
+ghcr.io/nsls2/synaps-dash:latest
+ghcr.io/nsls2/synaps-dash:sha-<commit>
+```
+
+This repo **only builds and publishes** the image. Deployment is handled separately
+(via an AAP / Ansible webhook that consumes the published image) and is out of scope
+here.
+
+### Runtime environment variables
+
+Supplied at container runtime (none are baked into the image at build time):
+
+| Variable | Required | Notes |
+|----------|----------|-------|
+| `ENTRA_TENANT_ID` | ✅ | Microsoft Entra (Azure AD) tenant ID |
+| `ENTRA_CLIENT_ID` | ✅ | Entra OAuth client ID |
+| `ENTRA_CLIENT_SECRET` | ✅ | Entra OAuth client secret |
+| `SESSION_SECRET` | ✅ | Session signing key (≥32 chars) |
+| `ENTRA_TOKEN_ENCRYPTION_KEY` | ✅ | Base64 32-byte key; **must stay stable** across restarts |
+| `TILED_SCOPE` | ✅ | Tiled API scope, e.g. `api://<client-id>/access_as_user` |
+| `DATABASE_URL` | ⬜ | `postgres://...` for shared/persistent storage; defaults to SQLite (see below) |
+| `NEXT_PUBLIC_TILED_URL` | ⬜ | Defaults to `https://tiled.nsls2.bnl.gov` |
+| `APP_BASE_URL` | ⬜ | App origin for OAuth callbacks (set in production) |
+
+### Data persistence
+
+The database only stores **encrypted Entra OAuth tokens** (a per-user credential
+cache), and the app **creates its schema automatically at startup** — no migration
+step is required in the container.
+
+- **Postgres is optional.** With no `DATABASE_URL`, the app falls back to a SQLite file
+  at `/app/data/app.sqlite` inside the container.
+- That SQLite file is **ephemeral** — it is lost when the container is recreated, which
+  just forces users to re-authenticate (no permanent data loss).
+- To persist tokens across restarts on a single instance, mount a volume:
+  `-v synaps-data:/app/data`.
+- For production or **multiple replicas**, set `DATABASE_URL` to Postgres instead — a
+  per-container SQLite file cannot be shared across replicas. In that case no volume is
+  needed.
+
 ## Database Setup
 
 The app uses a single `DATABASE_URL` for persistence. Supported values:

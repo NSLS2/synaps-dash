@@ -1,6 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  output: "standalone",
   serverExternalPackages: ['knex', 'pg', 'better-sqlite3'],
   images: {
     remotePatterns: [

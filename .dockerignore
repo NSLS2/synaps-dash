@@ -1,0 +1,13 @@
+node_modules
+.next
+.git
+.github
+.env*
+data
+*.sqlite
+*.sqlite-journal
+coverage
+*.tsbuildinfo
+*.log
+.DS_Store
+README.md
