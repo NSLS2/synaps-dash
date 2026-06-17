@@ -29,6 +29,10 @@ interface SourceInfo {
   // Whether <run>/diffraction/dp exists (always-on for runs created by
   // current holoptycho, absent on older runs).
   hasDiffraction: boolean;
+  // Whether <run>/diffraction/inference exists — the per-frame ViT patch output.
+  // Absent on iterative-only runs (and older runs), so the ViT patch tiles
+  // must not render for those.
+  hasInference: boolean;
 }
 
 // Tiles poll on this cadence using If-None-Match. Most polls return 304 (cheap,
@@ -78,9 +82,17 @@ async function discoverSources(runPath: string): Promise<SourceInfo> {
         hasVitAmp = vitChildren.items.some(c => c.id === 'mosaic_amp');
       } catch { /* absent on older runs */ }
     }
-    return { iterativeSource, hasVit, hasVitAmp, hasDiffraction: ids.has('diffraction') };
+    const hasDiffraction = ids.has('diffraction');
+    let hasInference = false;
+    if (hasDiffraction) {
+      try {
+        const diffChildren = await listChildren(`${runPath}/diffraction`, { limit: 20 });
+        hasInference = diffChildren.items.some(c => c.id === 'inference');
+      } catch { /* absent on iterative-only / older runs */ }
+    }
+    return { iterativeSource, hasVit, hasVitAmp, hasDiffraction, hasInference };
   } catch {
-    return { iterativeSource: null, hasVit: false, hasVitAmp: false, hasDiffraction: false };
+    return { iterativeSource: null, hasVit: false, hasVitAmp: false, hasDiffraction: false, hasInference: false };
   }
 }
 
@@ -240,7 +252,7 @@ function TiledImageTile({
 }
 
 export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
-  const [sources, setSources] = useState<SourceInfo>({ iterativeSource: null, hasVit: false, hasVitAmp: false, hasDiffraction: false });
+  const [sources, setSources] = useState<SourceInfo>({ iterativeSource: null, hasVit: false, hasVitAmp: false, hasDiffraction: false, hasInference: false });
   const [isDiscovering, setIsDiscovering] = useState(true);
   const [iteration, setIteration] = useState<number | null>(null);
   const [vitBatch, setVitBatch] = useState<number | null>(null);
@@ -430,16 +442,16 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
         )}
         {sources.hasDiffraction && latestFrameIdx !== null && displayFrameIdx !== null && (
           <div className="flex flex-col col-span-2">
-            <div className="grid grid-cols-3 gap-3">
+            <div className={`grid ${sources.hasInference ? 'grid-cols-3' : 'grid-cols-1'} gap-3`}>
               <TiledImageTile
                 title="Detector frame"
                 subtitle={(() => {
                   const scanFrame = displayFrameIdx * dpStride;
                   const latestScan = latestFrameIdx * dpStride;
-                  const strideNote = dpStride > 1 ? ` · 1 of every ${dpStride} frames` : '';
+                  const strideNote = dpStride > 1 ? ` · every ${dpStride}` : '';
                   return isFollowingLatest
-                    ? `frame ${scanFrame} (latest)${strideNote}`
-                    : `frame ${scanFrame} / ${latestScan}${strideNote}`;
+                    ? `${scanFrame} (latest)${strideNote}`
+                    : `${scanFrame} / ${latestScan}${strideNote}`;
                 })()}
                 path={`${path}/diffraction/dp`}
                 slice={displayFrameIdx}
@@ -449,21 +461,26 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
                 pollIntervalMs={isFollowingLatest ? POLL_INTERVAL_MS : 0}
                 onChanged={handleFrameChanged}
               />
-              <TiledImageTile
-                title="ViT patch (amp)"
-                subtitle={`frame ${displayFrameIdx * dpStride}`}
-                path={`${path}/diffraction/inference`}
-                slice={`${displayFrameIdx},0`}
-                pollIntervalMs={isFollowingLatest ? POLL_INTERVAL_MS : 0}
-              />
-              <TiledImageTile
-                title="ViT patch (phase)"
-                subtitle={`frame ${displayFrameIdx * dpStride}`}
-                path={`${path}/diffraction/inference`}
-                slice={`${displayFrameIdx},1`}
-                pollIntervalMs={isFollowingLatest ? POLL_INTERVAL_MS : 0}
-              />
-
+              {/* ViT patch tiles only exist when the ViT branch ran — hidden on
+                  iterative-only scans (no diffraction/inference array). */}
+              {sources.hasInference && (
+                <>
+                  <TiledImageTile
+                    title="ViT patch (amp)"
+                    subtitle={`frame ${displayFrameIdx * dpStride}`}
+                    path={`${path}/diffraction/inference`}
+                    slice={`${displayFrameIdx},0`}
+                    pollIntervalMs={isFollowingLatest ? POLL_INTERVAL_MS : 0}
+                  />
+                  <TiledImageTile
+                    title="ViT patch (phase)"
+                    subtitle={`frame ${displayFrameIdx * dpStride}`}
+                    path={`${path}/diffraction/inference`}
+                    slice={`${displayFrameIdx},1`}
+                    pollIntervalMs={isFollowingLatest ? POLL_INTERVAL_MS : 0}
+                  />
+                </>
+              )}
             </div>
             <div className="flex items-center gap-2 mt-2 px-1">
               <input
