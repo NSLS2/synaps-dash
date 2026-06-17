@@ -226,9 +226,16 @@ function TiledImageTile({
 
   return (
     <div className="flex flex-col">
-      <div className="flex items-baseline justify-between mb-1.5">
-        <span className="text-[11px] uppercase tracking-wider text-text-tertiary font-medium">{title}</span>
-        {subtitle && <span className="text-[10px] text-text-tertiary font-mono">{subtitle}</span>}
+      <div className="flex items-baseline justify-between gap-2 mb-1.5">
+        <span className="text-[11px] uppercase tracking-wider text-text-tertiary font-medium shrink-0 whitespace-nowrap">{title}</span>
+        {subtitle && (
+          <span
+            className="text-[10px] text-text-tertiary font-mono truncate min-w-0 text-right"
+            title={subtitle}
+          >
+            {subtitle}
+          </span>
+        )}
       </div>
       <div className="relative aspect-square rounded-lg overflow-hidden bg-surface-raised border border-border-subtle">
         <canvas
@@ -467,14 +474,14 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
                 <>
                   <TiledImageTile
                     title="ViT patch (amp)"
-                    subtitle={`frame ${displayFrameIdx * dpStride}`}
+                    subtitle={`${displayFrameIdx * dpStride}`}
                     path={`${path}/diffraction/inference`}
                     slice={`${displayFrameIdx},0`}
                     pollIntervalMs={isFollowingLatest ? POLL_INTERVAL_MS : 0}
                   />
                   <TiledImageTile
                     title="ViT patch (phase)"
-                    subtitle={`frame ${displayFrameIdx * dpStride}`}
+                    subtitle={`${displayFrameIdx * dpStride}`}
                     path={`${path}/diffraction/inference`}
                     slice={`${displayFrameIdx},1`}
                     pollIntervalMs={isFollowingLatest ? POLL_INTERVAL_MS : 0}
