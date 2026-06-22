@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, ChevronDown, Copy, Check, Layers, Grid3X3, Clock, Hash, Maximize2, Activity } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -24,6 +24,12 @@ interface DetailPanelProps {
   item: DatasetItem | null;
   onClose: () => void;
 }
+
+// Drawer is user-resizable; width persists across sessions in localStorage.
+const DRAWER_MIN_WIDTH = 420;
+const DRAWER_DEFAULT_WIDTH = 576; // matches the previous fixed max-w-xl
+const DRAWER_VIEWPORT_PAD = 64;   // keep a sliver of the list visible at max width
+const DRAWER_WIDTH_KEY = 'detailPanelWidth';
 
 function CollapsibleSection({
   title,
@@ -171,6 +177,47 @@ export function DetailPanel({ item, onClose }: DetailPanelProps) {
   const [segmentationTableData, setSegmentationTableData] = useState<Record<string, unknown>[] | null>(null);
   const [reconstructionMetadata, setReconstructionMetadata] = useState<Record<string, unknown> | null>(null);
   const [arrayChildren, setArrayChildren] = useState<DatasetItem[]>([]);
+  // Initialize from the persisted width (clamped to the viewport). The panel
+  // only renders when an item is selected (client-side), so reading storage in
+  // the initializer is safe — guarded for SSR where window is undefined.
+  const [drawerWidth, setDrawerWidth] = useState(() => {
+    if (typeof window === 'undefined') return DRAWER_DEFAULT_WIDTH;
+    const saved = Number(localStorage.getItem(DRAWER_WIDTH_KEY));
+    if (Number.isFinite(saved) && saved > 0) {
+      const max = window.innerWidth - DRAWER_VIEWPORT_PAD;
+      return Math.max(DRAWER_MIN_WIDTH, Math.min(saved, max));
+    }
+    return DRAWER_DEFAULT_WIDTH;
+  });
+  const resizingRef = useRef(false);
+
+  // Persist drawer width whenever it changes.
+  useEffect(() => {
+    localStorage.setItem(DRAWER_WIDTH_KEY, String(drawerWidth));
+  }, [drawerWidth]);
+
+  // Drag the left edge to resize. The drawer is anchored to the right, so its
+  // width grows as the pointer moves left: width = viewport width - pointer X.
+  const startResize = (e: React.PointerEvent) => {
+    e.preventDefault();
+    resizingRef.current = true;
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+    const onMove = (ev: PointerEvent) => {
+      if (!resizingRef.current) return;
+      const max = window.innerWidth - DRAWER_VIEWPORT_PAD;
+      setDrawerWidth(Math.max(DRAWER_MIN_WIDTH, Math.min(window.innerWidth - ev.clientX, max)));
+    };
+    const onUp = () => {
+      resizingRef.current = false;
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
 
   const isHoloptycho = item ? isHoloptychoRun(item.path, item.structureFamily) : false;
 
@@ -337,8 +384,19 @@ export function DetailPanel({ item, onClose }: DetailPanelProps) {
         animate={{ x: 0, opacity: 1 }}
         exit={{ x: '100%', opacity: 0.8 }}
         transition={{ type: 'spring', damping: 30, stiffness: 300 }}
-        className="fixed right-0 top-0 h-full w-full max-w-xl z-50 flex flex-col"
+        className="fixed right-0 top-0 h-full max-w-[100vw] z-50 flex flex-col"
+        style={{ width: drawerWidth }}
       >
+        {/* Resize handle — drag the left edge to widen/narrow the drawer.
+            Images are aspect-square in a 2-col grid, so they scale with width. */}
+        <div
+          onPointerDown={startResize}
+          title="Drag to resize"
+          className="absolute left-0 top-0 h-full w-2 cursor-col-resize z-20 group flex items-center justify-center"
+        >
+          <div className="h-full w-px bg-border-medium group-hover:bg-beam/60 transition-colors" />
+        </div>
+
         {/* Glass panel container */}
         <div className="h-full m-3 ml-0 rounded-2xl overflow-hidden glass border border-border-medium flex flex-col">
 
