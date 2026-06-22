@@ -96,6 +96,9 @@ interface TiledImageTileProps {
   // Called whenever a fresh image is loaded (i.e. ETag changed). Lets the parent
   // update timestamps and metadata-derived state.
   onChanged?: () => void;
+  // Anti-transpose the rendered image (reflect across the anti-diagonal).
+  // Applied in the pixel painter so non-square mosaics keep correct dimensions.
+  antiTranspose?: boolean;
 }
 
 function TiledImageTile({
@@ -105,6 +108,7 @@ function TiledImageTile({
   slice,
   pollIntervalMs,
   onChanged,
+  antiTranspose = false,
 }: TiledImageTileProps) {
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -194,7 +198,7 @@ function TiledImageTile({
           }
           return;
         }
-        paintFloatArrayToCanvas(canvas, data, w, h);
+        paintFloatArrayToCanvas(canvas, data, w, h, antiTranspose);
         if (cancelled) return;
         setHasLoadedOnce(true);
         setError(null);
@@ -210,7 +214,7 @@ function TiledImageTile({
     }
     const handle = setInterval(tick, pollIntervalMs);
     return () => { cancelled = true; clearInterval(handle); };
-  }, [path, slice, pollIntervalMs]);
+  }, [path, slice, pollIntervalMs, antiTranspose]);
 
   return (
     <div className="flex flex-col">
@@ -416,6 +420,7 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
             path={`${path}/vit/mosaic_amp`}
             slice=":,:"
             pollIntervalMs={vitPollMs}
+            antiTranspose
           />
         )}
         {sources.hasVit && (
@@ -426,6 +431,7 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
             slice=":,:"
             pollIntervalMs={vitPollMs}
             onChanged={handleVitChanged}
+            antiTranspose
           />
         )}
         {sources.hasDiffraction && latestFrameIdx !== null && displayFrameIdx !== null && (

@@ -64,6 +64,13 @@ function percentile(
 // surface shows through. The canvas is resized to (width, height) — CSS
 // handles display scaling.
 //
+// When `antiTranspose` is true the image is reflected across the anti-diagonal
+// (axes swapped and reversed: pixel (x,y) → (H-1-y, W-1-x)), which also swaps
+// the canvas dimensions. The contrast normalisation operates on the data values
+// and is orientation-independent; only pixel placement changes. Doing this in
+// the painter keeps non-square mosaics correct rather than relying on CSS,
+// which would distort an aspect-square container.
+//
 // Float arrays carry NaN through; integer arrays (e.g. uint16 detector
 // frames) are always finite, so the NaN check is a no-op for them. One
 // signature handles both so callers don't have to fork on dtype.
@@ -72,6 +79,7 @@ export function paintFloatArrayToCanvas(
   data: Float32Array | Float64Array | Uint16Array | Uint8Array,
   width: number,
   height: number,
+  antiTranspose: boolean = false,
 ): void {
   // Build a mask for the central 50% of the image (middle half in each dim)
   const y0 = Math.floor(height / 4);
@@ -95,15 +103,30 @@ export function paintFloatArrayToCanvas(
   const range = Number.isFinite(min) && max > min ? max - min : 1;
   const safeMin = Number.isFinite(min) ? min : 0;
 
-  canvas.width = width;
-  canvas.height = height;
+  // Anti-transpose swaps the output dimensions (axes are exchanged).
+  const outWidth = antiTranspose ? height : width;
+  const outHeight = antiTranspose ? width : height;
+
+  canvas.width = outWidth;
+  canvas.height = outHeight;
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
-  const imageData = ctx.createImageData(width, height);
+  const imageData = ctx.createImageData(outWidth, outHeight);
   const out = imageData.data;
   for (let i = 0; i < data.length; i++) {
     const v = data[i];
-    const o = i * 4;
+    // Map the source index to its destination index. Anti-transpose reflects
+    // across the anti-diagonal: (x,y)→(H-1-y, W-1-x); otherwise dst === i.
+    let o: number;
+    if (antiTranspose) {
+      const sx = i % width;
+      const sy = (i / width) | 0;
+      const dx = height - 1 - sy;
+      const dy = width - 1 - sx;
+      o = (dy * outWidth + dx) * 4;
+    } else {
+      o = i * 4;
+    }
     if (Number.isNaN(v)) {
       out[o] = 0; out[o + 1] = 0; out[o + 2] = 0; out[o + 3] = 0;
       continue;
