@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, type RefObject } from 'react';
 import { Loader2, Hash, Activity } from 'lucide-react';
 import {
   fetchArrayInfo,
@@ -9,7 +9,7 @@ import {
   getMetadata,
   type ArrayInfo,
 } from '@/lib/tiled/client';
-import { paintFloatArrayToCanvas } from '@/lib/tiled/colormap';
+import { paintFloatArrayToCanvas, type ViewRect } from '@/lib/tiled/colormap';
 import { useTiledSubscription } from '@/hooks/use-tiled-subscription';
 import { useLatestFilledIndex } from '@/hooks/use-latest-filled-index';
 
@@ -84,6 +84,292 @@ async function discoverSources(runPath: string): Promise<SourceInfo> {
   }
 }
 
+// Viridis gradient stops for the colorbar SVG (matches VIRIDIS_LUT endpoints).
+const VIRIDIS_GRADIENT_STOPS = [
+  { offset: 0, color: 'rgb(68,1,84)' },
+  { offset: 0.25, color: 'rgb(59,82,139)' },
+  { offset: 0.5, color: 'rgb(33,145,140)' },
+  { offset: 0.75, color: 'rgb(94,201,98)' },
+  { offset: 1, color: 'rgb(253,231,37)' },
+];
+
+// Compact numeric formatter for axis/colorbar labels: 3 significant figures,
+// using exponential notation for very large/small magnitudes.
+function formatTick(v: number): string {
+  if (!Number.isFinite(v)) return '—';
+  if (v === 0) return '0';
+  const abs = Math.abs(v);
+  if (abs >= 10000 || abs < 0.001) return v.toExponential(2);
+  return Number(v.toPrecision(3)).toString();
+}
+
+// Pixel-axis tick step for the un-zoomed (full) view.
+const AXIS_TICK_STEP = 100;
+
+// Pick a "nice" tick step (1/2/5 × 10^k) targeting ~5 intervals across `span`.
+// Used when zoomed in, where a fixed 100-px step would be too coarse or fine.
+function niceStep(span: number): number {
+  const raw = span / 5;
+  if (!Number.isFinite(raw) || raw <= 0) return 1;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const n = raw / mag;
+  const snapped = n < 1.5 ? 1 : n < 3 ? 2 : n < 7 ? 5 : 10;
+  return Math.max(1, snapped * mag);
+}
+
+// Generate axis ticks across the pixel range [start, end]. At full zoom the
+// step is AXIS_TICK_STEP (100 px); when zoomed in it adapts to the span. Each
+// tick carries its pixel value and fractional position (0–1) along the axis.
+function axisTicks(start: number, end: number, fullSpan: number): { value: number; frac: number }[] {
+  const span = end - start;
+  if (!Number.isFinite(span) || span <= 0) return [{ value: Math.round(start), frac: 0 }];
+  const step = span >= fullSpan * 0.999 ? AXIS_TICK_STEP : niceStep(span);
+  const ticks: { value: number; frac: number }[] = [];
+  const first = Math.ceil(start / step) * step;
+  for (let v = first; v <= end + 1e-6; v += step) {
+    ticks.push({ value: Math.round(v), frac: (v - start) / span });
+  }
+  if (ticks.length === 0) ticks.push({ value: Math.round(start), frac: 0 });
+  return ticks;
+}
+
+interface DecoratedImageTileProps {
+  title: string;
+  subtitle?: string;
+  canvasRef: RefObject<HTMLCanvasElement | null>;
+  render: {
+    min: number;
+    max: number;
+    x0: number;
+    y0: number;
+    width: number;
+    height: number;
+    fullWidth: number;
+    fullHeight: number;
+  } | null;
+  hasLoadedOnce: boolean;
+  error: string | null;
+  isZoomed: boolean;
+  // Drag-selected a region (display coords) to zoom into.
+  onZoom: (rect: ViewRect) => void;
+  onResetZoom: () => void;
+}
+
+// A normalized drag rectangle (0–1) within the image box, used to render the
+// live selection overlay while the user drags.
+interface DragRect { x0: number; y0: number; x1: number; y1: number }
+
+// Wraps the bare canvas with pixel-index x/y axes (ticked every 100 px at full
+// zoom) and a numeric viridis colorbar. The image box is sized to the rendered
+// aspect ratio so the canvas fills it exactly and ticks line up with the image
+// bounds. The x-axis sits in a mirrored row below so the main row's height
+// equals the image height, keeping the y-axis and colorbar aligned to the image.
+//
+// Drag a rectangle over the image to zoom in; the contrast then autoscales to
+// the central 50% of the new view. A reset control restores the full image.
+function DecoratedImageTile({
+  title,
+  subtitle,
+  canvasRef,
+  render,
+  hasLoadedOnce,
+  error,
+  isZoomed,
+  onZoom,
+  onResetZoom,
+}: DecoratedImageTileProps) {
+  const imageBoxRef = useRef<HTMLDivElement | null>(null);
+  const dragStartRef = useRef<{ x: number; y: number } | null>(null);
+  const [drag, setDrag] = useState<DragRect | null>(null);
+
+  // Normalized (0–1) pointer position within the image box.
+  const normFromEvent = (e: React.PointerEvent): { x: number; y: number } | null => {
+    const box = imageBoxRef.current;
+    if (!box) return null;
+    const r = box.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return null;
+    return {
+      x: Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)),
+      y: Math.max(0, Math.min(1, (e.clientY - r.top) / r.height)),
+    };
+  };
+
+  const handlePointerDown = (e: React.PointerEvent) => {
+    if (!render) return;
+    const p = normFromEvent(e);
+    if (!p) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    dragStartRef.current = p;
+    setDrag({ x0: p.x, y0: p.y, x1: p.x, y1: p.y });
+  };
+
+  const handlePointerMove = (e: React.PointerEvent) => {
+    if (!dragStartRef.current) return;
+    const p = normFromEvent(e);
+    if (!p) return;
+    setDrag({ x0: dragStartRef.current.x, y0: dragStartRef.current.y, x1: p.x, y1: p.y });
+  };
+
+  const handlePointerUp = () => {
+    const d = drag;
+    dragStartRef.current = null;
+    setDrag(null);
+    if (!d || !render) return;
+    const nx0 = Math.min(d.x0, d.x1);
+    const nx1 = Math.max(d.x0, d.x1);
+    const ny0 = Math.min(d.y0, d.y1);
+    const ny1 = Math.max(d.y0, d.y1);
+    // Ignore tiny selections (treat as a click, not a zoom).
+    if (nx1 - nx0 < 0.03 || ny1 - ny0 < 0.03) return;
+    // Map the normalized selection within the current view to display coords.
+    onZoom({
+      x0: render.x0 + nx0 * render.width,
+      y0: render.y0 + ny0 * render.height,
+      x1: render.x0 + nx1 * render.width,
+      y1: render.y0 + ny1 * render.height,
+    });
+  };
+
+  const w = render?.width ?? 1;
+  const h = render?.height ?? 1;
+  const aspect = render ? w / h : 1;
+  const xTicks = render ? axisTicks(render.x0, render.x0 + render.width, render.fullWidth) : [];
+  // y is in image coordinates: row 0 at the top, increasing downward.
+  const yTicks = render ? axisTicks(render.y0, render.y0 + render.height, render.fullHeight) : [];
+  const gradId = `cbar-${title.replace(/[^a-z0-9]/gi, '')}`;
+
+  const sel = drag && {
+    left: `${Math.min(drag.x0, drag.x1) * 100}%`,
+    top: `${Math.min(drag.y0, drag.y1) * 100}%`,
+    width: `${Math.abs(drag.x1 - drag.x0) * 100}%`,
+    height: `${Math.abs(drag.y1 - drag.y0) * 100}%`,
+  };
+
+  return (
+    <div className="flex flex-col">
+      <div className="flex items-baseline justify-between mb-1.5">
+        <span className="text-[11px] uppercase tracking-wider text-text-tertiary font-medium">{title}</span>
+        {subtitle && <span className="text-[10px] text-text-tertiary font-mono">{subtitle}</span>}
+      </div>
+
+      {/* main row: y-axis | image | colorbar gradient | colorbar labels.
+          The image box is the tallest child, so items-stretch makes the others
+          match its height. */}
+      <div className="flex items-stretch gap-1">
+        {/* y-axis ticks, absolutely placed by pixel fraction */}
+        <div className="relative w-10 shrink-0 text-[16px] font-mono text-text-primary leading-none">
+          {render && yTicks.map((t) => {
+            const top = t.frac <= 0.02 ? '0%' : t.frac >= 0.98 ? '100%' : `${t.frac * 100}%`;
+            const ty = t.frac <= 0.02 ? '0' : t.frac >= 0.98 ? '-100%' : '-50%';
+            return (
+              <span
+                key={t.value}
+                className="absolute right-0 whitespace-nowrap"
+                style={{ top, transform: `translateY(${ty})` }}
+              >
+                {t.value}
+              </span>
+            );
+          })}
+        </div>
+
+        {/* image box — drag to zoom */}
+        <div
+          ref={imageBoxRef}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          className="flex-1 min-w-0 relative rounded-lg overflow-hidden bg-surface-raised border border-border-subtle cursor-crosshair touch-none select-none"
+          style={{ aspectRatio: String(aspect) }}
+        >
+          <canvas
+            ref={canvasRef}
+            aria-label={title}
+            className="w-full h-full object-contain pointer-events-none"
+          />
+          {sel && (
+            <div
+              className="absolute border border-beam bg-beam/15 pointer-events-none"
+              style={sel}
+            />
+          )}
+          {isZoomed && (
+            <button
+              type="button"
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={onResetZoom}
+              className="absolute top-1 right-1 z-10 px-1.5 py-0.5 rounded bg-surface-ground/85 border border-beam/40 text-[10px] uppercase tracking-wider text-beam hover:bg-beam/10"
+            >
+              Reset
+            </button>
+          )}
+          {!hasLoadedOnce && (
+            <div className="absolute inset-0 flex items-center justify-center">
+              <Loader2 className="w-5 h-5 text-beam animate-spin" />
+            </div>
+          )}
+          {error && (
+            <div className="absolute inset-0 flex items-center justify-center text-text-tertiary text-xs">
+              {error}
+            </div>
+          )}
+        </div>
+
+        {/* colorbar gradient */}
+        <div className="w-3 shrink-0 self-stretch rounded-sm overflow-hidden border border-border-subtle">
+          <svg width="100%" height="100%" preserveAspectRatio="none" className="block w-full h-full">
+            <defs>
+              <linearGradient id={gradId} x1="0" y1="1" x2="0" y2="0">
+                {VIRIDIS_GRADIENT_STOPS.map((s) => (
+                  <stop key={s.offset} offset={`${s.offset * 100}%`} stopColor={s.color} />
+                ))}
+              </linearGradient>
+            </defs>
+            <rect x="0" y="0" width="100%" height="100%" fill={`url(#${gradId})`} />
+          </svg>
+        </div>
+        {/* colorbar labels (max top → min bottom) */}
+        <div className="flex flex-col justify-between items-start w-12 shrink-0 text-[16px] font-mono text-text-primary leading-none">
+          <span>{render ? formatTick(render.max) : '—'}</span>
+          <span>{render ? formatTick((render.min + render.max) / 2) : ''}</span>
+          <span>{render ? formatTick(render.min) : '—'}</span>
+        </div>
+      </div>
+
+      {/* x-axis row, mirrors the main row's column widths so ticks align under
+          the image box */}
+      <div className="flex gap-1 mt-0.5">
+        <div className="w-10 shrink-0" />
+        <div className="flex-1 relative h-5 text-[16px] font-mono text-text-primary leading-none">
+          {render && xTicks.map((t) => {
+            const left = t.frac <= 0.02 ? '0%' : t.frac >= 0.98 ? '100%' : `${t.frac * 100}%`;
+            const tx = t.frac <= 0.02 ? '0' : t.frac >= 0.98 ? '-100%' : '-50%';
+            return (
+              <span
+                key={t.value}
+                className="absolute top-0"
+                style={{ left, transform: `translateX(${tx})` }}
+              >
+                {t.value}
+              </span>
+            );
+          })}
+        </div>
+        <div className="w-3 shrink-0" />
+        <div className="w-12 shrink-0" />
+      </div>
+
+      {/* px unit label, centered under the image box */}
+      <div className="flex gap-1">
+        <div className="w-10 shrink-0" />
+        <div className="flex-1 text-center text-[16px] uppercase tracking-wider text-text-secondary">px</div>
+        <div className="w-3 shrink-0" />
+        <div className="w-12 shrink-0" />
+      </div>
+    </div>
+  );
+}
+
 interface TiledImageTileProps {
   title: string;
   subtitle?: string;
@@ -99,6 +385,9 @@ interface TiledImageTileProps {
   // Anti-transpose the rendered image (reflect across the anti-diagonal).
   // Applied in the pixel painter so non-square mosaics keep correct dimensions.
   antiTranspose?: boolean;
+  // Draw pixel-index x/y axes around the image and a numeric colorbar showing
+  // the display range. Used for the ViT mosaics.
+  decorated?: boolean;
 }
 
 function TiledImageTile({
@@ -109,11 +398,59 @@ function TiledImageTile({
   pollIntervalMs,
   onChanged,
   antiTranspose = false,
+  decorated = false,
 }: TiledImageTileProps) {
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Display range + rendered view (origin/size in display coords) + full
+  // display dimensions from the last paint — drives the colorbar labels, axis
+  // tick ranges and zoom clamping (only used when `decorated`).
+  const [render, setRender] = useState<
+    {
+      min: number;
+      max: number;
+      x0: number;
+      y0: number;
+      width: number;
+      height: number;
+      fullWidth: number;
+      fullHeight: number;
+    } | null
+  >(null);
+  // Current zoom rectangle in display coords, or null for the full image.
+  const [view, setView] = useState<ViewRect | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const onChangedRef = useRef(onChanged);
+  // Latest decoded frame, kept so zoom changes can repaint without refetching.
+  const dataRef = useRef<{
+    data: Float32Array | Float64Array | Uint16Array | Uint8Array;
+    w: number;
+    h: number;
+  } | null>(null);
+  const viewRef = useRef<ViewRect | null>(view);
+  useEffect(() => { viewRef.current = view; }, [view]);
+
+  // Repaint the current frame at the given view. Used both by the polling loop
+  // (fresh data) and on zoom changes (same data, new crop + autoscale).
+  const paint = useCallback((v: ViewRect | null) => {
+    const d = dataRef.current;
+    const canvas = canvasRef.current;
+    if (!d || !canvas) return;
+    const r = paintFloatArrayToCanvas(canvas, d.data, d.w, d.h, antiTranspose, v ?? undefined);
+    setRender({
+      min: r.min, max: r.max,
+      x0: r.x0, y0: r.y0, width: r.width, height: r.height,
+      fullWidth: r.fullWidth, fullHeight: r.fullHeight,
+    });
+  }, [antiTranspose]);
+  const paintRef = useRef(paint);
+  useEffect(() => { paintRef.current = paint; }, [paint]);
+
+  // Repaint when the zoom view changes (no refetch needed).
+  useEffect(() => { paint(view); }, [view, paint]);
+
+  // Reset zoom whenever the underlying array changes.
+  useEffect(() => { setView(null); }, [path, slice]);
 
   useEffect(() => {
     onChangedRef.current = onChanged;
@@ -198,7 +535,8 @@ function TiledImageTile({
           }
           return;
         }
-        paintFloatArrayToCanvas(canvas, data, w, h, antiTranspose);
+        dataRef.current = { data, w, h };
+        paintRef.current(viewRef.current);
         if (cancelled) return;
         setHasLoadedOnce(true);
         setError(null);
@@ -215,6 +553,24 @@ function TiledImageTile({
     const handle = setInterval(tick, pollIntervalMs);
     return () => { cancelled = true; clearInterval(handle); };
   }, [path, slice, pollIntervalMs, antiTranspose]);
+
+  // Decorated tiles (the ViT mosaics) get pixel-index x/y axes and a numeric
+  // colorbar; everything else renders just the bare canvas.
+  if (decorated) {
+    return (
+      <DecoratedImageTile
+        title={title}
+        subtitle={subtitle}
+        canvasRef={canvasRef}
+        render={render}
+        hasLoadedOnce={hasLoadedOnce}
+        error={error}
+        isZoomed={view !== null}
+        onZoom={setView}
+        onResetZoom={() => setView(null)}
+      />
+    );
+  }
 
   return (
     <div className="flex flex-col">
@@ -421,6 +777,7 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
             slice=":,:"
             pollIntervalMs={vitPollMs}
             antiTranspose
+            decorated
           />
         )}
         {sources.hasVit && (
@@ -432,6 +789,7 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
             pollIntervalMs={vitPollMs}
             onChanged={handleVitChanged}
             antiTranspose
+            decorated
           />
         )}
         {sources.hasDiffraction && latestFrameIdx !== null && displayFrameIdx !== null && (

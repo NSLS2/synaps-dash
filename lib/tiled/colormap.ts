@@ -40,93 +40,139 @@ export const VIRIDIS_LUT: [number, number, number][] = [
   [207,241,26],[209,241,25],[212,242,24],[215,242,24],[217,242,23],[220,243,22],[222,243,22],[225,243,21],
 ];
 
-// Compute the p-th percentile of finite values in a typed array.
-function percentile(
-  data: Float32Array | Float64Array | Uint16Array | Uint8Array,
-  p: number,
-  mask?: Uint8Array,
-): number {
-  const vals: number[] = [];
-  for (let i = 0; i < data.length; i++) {
-    if (mask && !mask[i]) continue;
-    const v = data[i];
-    if (!Number.isNaN(v) && Number.isFinite(v)) vals.push(v);
-  }
-  if (vals.length === 0) return 0;
+// 1st/99th percentile of a pre-collected list of finite values. Returns
+// [NaN, NaN] when empty so callers can detect "no usable data".
+function loHiPercentile(vals: number[]): [number, number] {
+  if (vals.length === 0) return [NaN, NaN];
   vals.sort((a, b) => a - b);
-  const idx = Math.min(Math.floor((p / 100) * vals.length), vals.length - 1);
-  return vals[idx];
+  const lo = vals[Math.min(Math.floor(0.01 * vals.length), vals.length - 1)];
+  const hi = vals[Math.min(Math.floor(0.99 * vals.length), vals.length - 1)];
+  return [lo, hi];
+}
+
+// A crop rectangle in display (post anti-transpose) pixel coordinates. The
+// painter only renders pixels inside this rectangle and computes contrast from
+// it, enabling client-side zoom with per-view autoscaling.
+export interface ViewRect {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
 }
 
 // Paint a 2D numeric array onto `canvas` with viridis. Normalises contrast
-// using 1st/99th percentile of the central 50% of the image (matching offline
-// analysis behaviour). NaN pixels are written with alpha=0 so the underlying
-// surface shows through. The canvas is resized to (width, height) — CSS
-// handles display scaling.
+// using 1st/99th percentile of the central 50% of the *visible region* (the
+// `view` rectangle, or the whole image when omitted), matching offline analysis
+// behaviour. NaN pixels are written with alpha=0 so the underlying surface
+// shows through.
 //
 // When `antiTranspose` is true the image is reflected across the anti-diagonal
 // (axes swapped and reversed: pixel (x,y) → (H-1-y, W-1-x)), which also swaps
-// the canvas dimensions. The contrast normalisation operates on the data values
-// and is orientation-independent; only pixel placement changes. Doing this in
-// the painter keeps non-square mosaics correct rather than relying on CSS,
-// which would distort an aspect-square container.
+// the canvas dimensions. The `view` rectangle is expressed in these final
+// display coordinates, so zoom interactions don't need to undo the transpose.
 //
 // Float arrays carry NaN through; integer arrays (e.g. uint16 detector
 // frames) are always finite, so the NaN check is a no-op for them. One
 // signature handles both so callers don't have to fork on dtype.
+//
+// Returns the display range (min/max) used for the colormap, the rendered view
+// origin/size, and the full display dimensions, so callers can draw aligned
+// axes/colorbar and clamp further zoom.
+export interface PaintResult {
+  // Low/high data values mapped to the bottom/top of the colormap.
+  min: number;
+  max: number;
+  // Rendered view origin + size, in display coordinates.
+  x0: number;
+  y0: number;
+  width: number;
+  height: number;
+  // Full display dimensions (post anti-transpose), independent of the view.
+  fullWidth: number;
+  fullHeight: number;
+}
+
 export function paintFloatArrayToCanvas(
   canvas: HTMLCanvasElement,
   data: Float32Array | Float64Array | Uint16Array | Uint8Array,
   width: number,
   height: number,
   antiTranspose: boolean = false,
-): void {
-  // Build a mask for the central 50% of the image (middle half in each dim)
-  const y0 = Math.floor(height / 4);
-  const y1 = Math.floor((3 * height) / 4);
-  const x0 = Math.floor(width / 4);
-  const x1 = Math.floor((3 * width) / 4);
-  const centralMask = new Uint8Array(data.length);
-  for (let y = y0; y < y1; y++) {
-    for (let x = x0; x < x1; x++) {
-      centralMask[y * width + x] = 1;
-    }
+  view?: ViewRect,
+): PaintResult {
+  // Full display dimensions after the optional anti-transpose.
+  const fullWidth = antiTranspose ? height : width;
+  const fullHeight = antiTranspose ? width : height;
+
+  // Resolve + clamp the view rectangle (display coords). Omitted → whole image.
+  const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+  const vx0 = view ? clamp(Math.floor(view.x0), 0, fullWidth - 1) : 0;
+  const vy0 = view ? clamp(Math.floor(view.y0), 0, fullHeight - 1) : 0;
+  const vx1 = view ? clamp(Math.ceil(view.x1), vx0 + 1, fullWidth) : fullWidth;
+  const vy1 = view ? clamp(Math.ceil(view.y1), vy0 + 1, fullHeight) : fullHeight;
+  const viewW = vx1 - vx0;
+  const viewH = vy1 - vy0;
+
+  // Central 50% of the view (middle half in each dim), in display coords.
+  const cx0 = vx0 + Math.floor(viewW / 4);
+  const cx1 = vx0 + Math.floor((3 * viewW) / 4);
+  const cy0 = vy0 + Math.floor(viewH / 4);
+  const cy1 = vy0 + Math.floor((3 * viewH) / 4);
+
+  // Single pass over the source: map each pixel to its display coordinate,
+  // collect finite values inside the view (for the fallback range) and inside
+  // the central region (for the primary range).
+  const central: number[] = [];
+  const viewAll: number[] = [];
+  for (let i = 0; i < data.length; i++) {
+    const v = data[i];
+    if (Number.isNaN(v) || !Number.isFinite(v)) continue;
+    const sx = i % width;
+    const sy = (i / width) | 0;
+    const dx = antiTranspose ? height - 1 - sy : sx;
+    const dy = antiTranspose ? width - 1 - sx : sy;
+    if (dx < vx0 || dx >= vx1 || dy < vy0 || dy >= vy1) continue;
+    viewAll.push(v);
+    if (dx >= cx0 && dx < cx1 && dy >= cy0 && dy < cy1) central.push(v);
   }
-  let min = percentile(data, 1, centralMask);
-  let max = percentile(data, 99, centralMask);
-  // Fall back to global range if central region is all-NaN or constant
+  let [min, max] = loHiPercentile(central);
+  // Fall back to the whole-view range if the central region is empty/constant.
   if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) {
-    min = percentile(data, 1);
-    max = percentile(data, 99);
+    [min, max] = loHiPercentile(viewAll);
   }
   // All-NaN or constant arrays: avoid divide-by-zero / non-finite range.
   const range = Number.isFinite(min) && max > min ? max - min : 1;
   const safeMin = Number.isFinite(min) ? min : 0;
 
-  // Anti-transpose swaps the output dimensions (axes are exchanged).
-  const outWidth = antiTranspose ? height : width;
-  const outHeight = antiTranspose ? width : height;
+  // Canvas is sized to the view; pixels outside the view are simply skipped.
+  const result: PaintResult = {
+    min: safeMin,
+    max: safeMin + range,
+    x0: vx0,
+    y0: vy0,
+    width: viewW,
+    height: viewH,
+    fullWidth,
+    fullHeight,
+  };
 
-  canvas.width = outWidth;
-  canvas.height = outHeight;
+  canvas.width = viewW;
+  canvas.height = viewH;
   const ctx = canvas.getContext('2d');
-  if (!ctx) return;
-  const imageData = ctx.createImageData(outWidth, outHeight);
+  if (!ctx) return result;
+  const imageData = ctx.createImageData(viewW, viewH);
   const out = imageData.data;
   for (let i = 0; i < data.length; i++) {
     const v = data[i];
-    // Map the source index to its destination index. Anti-transpose reflects
-    // across the anti-diagonal: (x,y)→(H-1-y, W-1-x); otherwise dst === i.
-    let o: number;
-    if (antiTranspose) {
-      const sx = i % width;
-      const sy = (i / width) | 0;
-      const dx = height - 1 - sy;
-      const dy = width - 1 - sx;
-      o = (dy * outWidth + dx) * 4;
-    } else {
-      o = i * 4;
-    }
+    // Map the source index to display coords; anti-transpose reflects across
+    // the anti-diagonal: (x,y)→(H-1-y, W-1-x).
+    const sx = i % width;
+    const sy = (i / width) | 0;
+    const dx = antiTranspose ? height - 1 - sy : sx;
+    const dy = antiTranspose ? width - 1 - sx : sy;
+    // Skip anything outside the visible view rectangle.
+    if (dx < vx0 || dx >= vx1 || dy < vy0 || dy >= vy1) continue;
+    const o = ((dy - vy0) * viewW + (dx - vx0)) * 4;
     if (Number.isNaN(v)) {
       out[o] = 0; out[o + 1] = 0; out[o + 2] = 0; out[o + 3] = 0;
       continue;
@@ -141,4 +187,5 @@ export function paintFloatArrayToCanvas(
     out[o + 3] = 255;
   }
   ctx.putImageData(imageData, 0, 0);
+  return result;
 }
