@@ -286,6 +286,7 @@ function DecoratedImageTile({
             ref={canvasRef}
             aria-label={title}
             className="w-full h-full object-contain pointer-events-none"
+            style={{ imageRendering: 'pixelated' }}
           />
           {sel && (
             <div
@@ -583,6 +584,7 @@ function TiledImageTile({
           ref={canvasRef}
           aria-label={title}
           className="w-full h-full object-contain"
+          style={{ imageRendering: 'pixelated' }}
         />
         {!hasLoadedOnce && (
           <div className="absolute inset-0 flex items-center justify-center">
