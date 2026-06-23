@@ -156,11 +156,14 @@ export function paintFloatArrayToCanvas(
     fullHeight,
   };
 
-  canvas.width = viewW;
-  canvas.height = viewH;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return result;
-  const imageData = ctx.createImageData(viewW, viewH);
+  // Build the colormapped pixels at the data's native (view) resolution in an
+  // offscreen buffer first.
+  const src = document.createElement('canvas');
+  src.width = viewW;
+  src.height = viewH;
+  const sctx = src.getContext('2d');
+  if (!sctx) return result;
+  const imageData = sctx.createImageData(viewW, viewH);
   const out = imageData.data;
   for (let i = 0; i < data.length; i++) {
     const v = data[i];
@@ -186,6 +189,28 @@ export function paintFloatArrayToCanvas(
     out[o + 2] = b;
     out[o + 3] = 255;
   }
-  ctx.putImageData(imageData, 0, 0);
+  sctx.putImageData(imageData, 0, 0);
+
+  // Supersample onto the visible canvas with high-quality (bicubic) smoothing.
+  // The browser's default CSS upscale of a tiny canvas is bilinear, which looks
+  // soft/blocky; rendering the backing store at a higher resolution with a
+  // better resampler makes the panel-scale image blend smoothly yet look sharp.
+  // Skip when the view is already large (it'll be downscaled to fit anyway).
+  const SUPERSAMPLE_TARGET = 1400; // aim for ~this many px on the long side
+  const longSide = Math.max(viewW, viewH);
+  const factor = longSide >= SUPERSAMPLE_TARGET
+    ? 1
+    : Math.min(8, Math.ceil(SUPERSAMPLE_TARGET / longSide));
+  canvas.width = viewW * factor;
+  canvas.height = viewH * factor;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return result;
+  if (factor === 1) {
+    ctx.putImageData(imageData, 0, 0);
+  } else {
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(src, 0, 0, viewW, viewH, 0, 0, canvas.width, canvas.height);
+  }
   return result;
 }

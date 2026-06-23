@@ -131,6 +131,10 @@ export interface ListChildrenOptions {
   sort?: string;
   fullText?: string;
   filters?: Record<string, string>;
+  // Skip the 30s response cache and fetch fresh. Used by pollers that need to
+  // see newly-created children promptly (e.g. holoptycho sub-container/array
+  // discovery while a run is still writing).
+  noCache?: boolean;
 }
 
 // Parse search query for field-specific filters
@@ -177,7 +181,7 @@ export async function listChildren(
     if (p.endsWith('/holoptycho')) return '-metadata.started_at';
     return '-_';
   };
-  const { offset = 0, limit = 20, sort = getDefaultSort(path), fullText, filters } = options;
+  const { offset = 0, limit = 20, sort = getDefaultSort(path), fullText, filters, noCache = false } = options;
 
   const url = new URL(`${API_BASE}/search/${path}`, window.location.origin);
   url.searchParams.set('page[offset]', offset.toString());
@@ -211,10 +215,12 @@ export async function listChildren(
 
   const cacheKey = url.toString();
 
-  // Check cache first
-  const cached = getCachedResponse<{ items: DatasetItem[]; hasMore: boolean; totalCount: number }>(cacheKey);
-  if (cached) {
-    return cached;
+  // Check cache first (unless the caller asked for fresh data).
+  if (!noCache) {
+    const cached = getCachedResponse<{ items: DatasetItem[]; hasMore: boolean; totalCount: number }>(cacheKey);
+    if (cached) {
+      return cached;
+    }
   }
 
   const response = await fetchWithAuth(cacheKey);

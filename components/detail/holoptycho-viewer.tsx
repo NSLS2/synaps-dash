@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef, type RefObject } from 'react';
-import { Loader2, Hash, Activity } from 'lucide-react';
+import { Loader2, Hash, Activity, Eye, EyeOff } from 'lucide-react';
 import {
   fetchArrayInfo,
   fetchArrayBytesIfChanged,
@@ -26,6 +26,9 @@ interface SourceInfo {
   hasVit: boolean;
   // Whether vit/mosaic_amp is available (written by current holoptycho; absent on older runs).
   hasVitAmp: boolean;
+  // Whether vit/segmentation_mask is available (DP-relative blob mask overlaid
+  // on the detector frame). Absent on runs written before segmentation landed.
+  hasVitSegMask: boolean;
   // Whether <run>/diffraction/dp exists (always-on for runs created by
   // current holoptycho, absent on older runs).
   hasDiffraction: boolean;
@@ -65,24 +68,172 @@ function deriveDisplayShape(fullShape: number[]): [number, number] | null {
   return [h, w];
 }
 
+// Inner-crop rectangle (the region kept and stitched into the mosaic), written
+// by the holoptycho pipeline onto the run container's metadata as:
+//   patch_crop_box: [[y0, x0], [y1, x1]]   // top-left, bottom-right
+// Coordinates are integer (row, col) in the patch's own pixel frame — the same
+// frame as the plotted amp/phase patch arrays — so the overlay maps directly
+// with no scaling. Returns null for anything missing or malformed so the GUI
+// simply skips drawing the box rather than crashing.
+interface CropBox { y0: number; x0: number; y1: number; x1: number }
+
+function parseCropBox(raw: unknown): CropBox | null {
+  if (!Array.isArray(raw) || raw.length !== 2) return null;
+  const [tl, br] = raw;
+  if (!Array.isArray(tl) || !Array.isArray(br) || tl.length < 2 || br.length < 2) return null;
+  const [y0, x0] = tl;
+  const [y1, x1] = br;
+  if (![y0, x0, y1, x1].every((n) => typeof n === 'number' && Number.isFinite(n))) return null;
+  if (x1 <= x0 || y1 <= y0) return null;
+  return { y0, x0, y1, x1 };
+}
+
+// A labeled rectangle overlay, positioned as a fraction of the full image
+// dimensions. Box coords are in the image's own (row, col) pixel frame — the
+// same frame as the plotted array — so they map directly with no scaling. The
+// arrays here are square and fill their aspect-square box via object-contain,
+// so percentages line up 1:1.
+function LabeledBox({
+  box,
+  fullWidth,
+  fullHeight,
+  label,
+}: {
+  box: CropBox;
+  fullWidth: number;
+  fullHeight: number;
+  label: string;
+}) {
+  if (!(fullWidth > 0) || !(fullHeight > 0)) return null;
+  return (
+    <div
+      className="absolute border border-white pointer-events-none"
+      style={{
+        left: `${(box.x0 / fullWidth) * 100}%`,
+        top: `${(box.y0 / fullHeight) * 100}%`,
+        width: `${((box.x1 - box.x0) / fullWidth) * 100}%`,
+        height: `${((box.y1 - box.y0) / fullHeight) * 100}%`,
+      }}
+    >
+      <span className="absolute left-0 top-0 px-1 py-0.5 leading-none text-[9px] font-mono whitespace-nowrap text-white bg-surface-ground/80 rounded-br">
+        {label}
+      </span>
+    </div>
+  );
+}
+
+// Segmentation blob colour (nova pink) — contrasts with the viridis diffraction
+// background and the white box/crosshair. Last value is the per-pixel alpha.
+const MASK_RGBA: [number, number, number, number] = [244, 114, 182, 130];
+
+// Paint a uint8 (ny, nx) blob mask into `canvas` at native resolution: nonzero
+// pixels get the translucent highlight colour, zeros stay fully transparent.
+function paintMaskToCanvas(canvas: HTMLCanvasElement, data: Uint8Array, w: number, h: number) {
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const imageData = ctx.createImageData(w, h);
+  const out = imageData.data;
+  const [r, g, b, a] = MASK_RGBA;
+  for (let i = 0; i < w * h && i < data.length; i++) {
+    if (data[i] !== 0) {
+      out[i * 4] = r;
+      out[i * 4 + 1] = g;
+      out[i * 4 + 2] = b;
+      out[i * 4 + 3] = a;
+    }
+  }
+  ctx.putImageData(imageData, 0, 0);
+}
+
+// Translucent overlay of a DP-relative segmentation mask, layered over the
+// detector-frame canvas. The mask shares the detector frame's pixel grid, so it
+// lines up 1:1 (no scaling) when both fill the same aspect-square box. Fetches +
+// polls independently; silently renders nothing if the array is missing.
+function MaskOverlay({ path, pollIntervalMs }: { path: string; pollIntervalMs?: number }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let etag: string | null = null;
+    let inflight = false;
+    let shape: [number, number] | null = null;
+
+    const tick = async () => {
+      if (cancelled || inflight) return;
+      inflight = true;
+      try {
+        if (!shape) {
+          const info = await fetchArrayInfo(path).catch(() => null);
+          const s = info ? deriveDisplayShape(info.shape) : null;
+          if (!s) return;
+          shape = s;
+        }
+        const result = await fetchArrayBytesIfChanged(path, ':,:', etag);
+        if (cancelled || result.status === 'unchanged' || result.status === 'error') return;
+        etag = result.etag;
+        const [h, w] = shape;
+        const data = new Uint8Array(result.buffer);
+        const canvas = canvasRef.current;
+        if (!canvas || data.length < w * h) return;
+        paintMaskToCanvas(canvas, data, w, h);
+      } finally {
+        inflight = false;
+      }
+    };
+
+    tick();
+    if (!pollIntervalMs) return () => { cancelled = true; };
+    const handle = setInterval(tick, pollIntervalMs);
+    return () => { cancelled = true; clearInterval(handle); };
+  }, [path, pollIntervalMs]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      aria-hidden
+      className="absolute inset-0 w-full h-full object-contain pointer-events-none"
+    />
+  );
+}
+
 async function discoverSources(runPath: string): Promise<SourceInfo> {
   try {
-    const children = await listChildren(runPath, { limit: 10 });
+    const children = await listChildren(runPath, { limit: 10, noCache: true });
     const ids = new Set(children.items.map(c => c.id));
     const iterativeSource = ids.has('live') ? 'live' : ids.has('final') ? 'final' : null;
     const hasVit = ids.has('vit');
     let hasVitAmp = false;
+    let hasVitSegMask = false;
     if (hasVit) {
       try {
-        const vitChildren = await listChildren(`${runPath}/vit`, { limit: 20 });
+        const vitChildren = await listChildren(`${runPath}/vit`, { limit: 20, noCache: true });
         hasVitAmp = vitChildren.items.some(c => c.id === 'mosaic_amp');
+        hasVitSegMask = vitChildren.items.some(c => c.id === 'segmentation_mask');
       } catch { /* absent on older runs */ }
     }
-    return { iterativeSource, hasVit, hasVitAmp, hasDiffraction: ids.has('diffraction') };
+    return { iterativeSource, hasVit, hasVitAmp, hasVitSegMask, hasDiffraction: ids.has('diffraction') };
   } catch {
-    return { iterativeSource: null, hasVit: false, hasVitAmp: false, hasDiffraction: false };
+    return { iterativeSource: null, hasVit: false, hasVitAmp: false, hasVitSegMask: false, hasDiffraction: false };
   }
 }
+
+// True when two discovery snapshots are identical — lets the poller avoid
+// pointless state updates / re-renders when nothing new has appeared.
+function sameSources(a: SourceInfo, b: SourceInfo): boolean {
+  return (
+    a.iterativeSource === b.iterativeSource &&
+    a.hasVit === b.hasVit &&
+    a.hasVitAmp === b.hasVitAmp &&
+    a.hasVitSegMask === b.hasVitSegMask &&
+    a.hasDiffraction === b.hasDiffraction
+  );
+}
+
+// Cadence for re-checking which sub-containers/arrays exist, so new plots show
+// up on their own while a run is still being written.
+const DISCOVERY_POLL_MS = 3000;
 
 // Viridis gradient stops for the colorbar SVG (matches VIRIDIS_LUT endpoints).
 const VIRIDIS_GRADIENT_STOPS = [
@@ -286,7 +437,8 @@ function DecoratedImageTile({
             ref={canvasRef}
             aria-label={title}
             className="w-full h-full object-contain pointer-events-none"
-            style={{ imageRendering: 'pixelated' }}
+            // Slight extra softening on top of the browser's bilinear upscale.
+            // Bump the px value for more smoothing, drop to 0/remove for none.
           />
           {sel && (
             <div
@@ -389,6 +541,18 @@ interface TiledImageTileProps {
   // Draw pixel-index x/y axes around the image and a numeric colorbar showing
   // the display range. Used for the ViT mosaics.
   decorated?: boolean;
+  // Optional inner-crop rectangle (patch-pixel coords) to overlay on the image.
+  // Used by the ViT amp/phase patch tiles to show what's kept before stitching.
+  cropBox?: CropBox | null;
+  // Optional segmentation rectangle (detector-pixel coords) to overlay on the
+  // image. Used by the detector-frame tile.
+  segBox?: CropBox | null;
+  // Optional path to a DP-relative segmentation mask array to overlay as a
+  // translucent blob on top of the image. Used by the detector-frame tile.
+  maskPath?: string;
+  // Draw horizontal + vertical lines through the image center (e.g. to mark the
+  // detector center on the diffraction frame).
+  centerAxes?: boolean;
 }
 
 function TiledImageTile({
@@ -400,6 +564,10 @@ function TiledImageTile({
   onChanged,
   antiTranspose = false,
   decorated = false,
+  cropBox,
+  segBox,
+  maskPath,
+  centerAxes = false,
 }: TiledImageTileProps) {
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -584,8 +752,38 @@ function TiledImageTile({
           ref={canvasRef}
           aria-label={title}
           className="w-full h-full object-contain"
-          style={{ imageRendering: 'pixelated' }}
         />
+        {/* Translucent segmentation blob, layered between the image and the
+            box/crosshair overlays. */}
+        {maskPath && <MaskOverlay path={maskPath} pollIntervalMs={pollIntervalMs} />}
+        {/* Inner-crop rectangle (ViT patch tiles) and segmentation rectangle
+            (detector-frame tile), drawn from metadata in the array's own pixel
+            frame. */}
+        {cropBox && render && (
+          <LabeledBox
+            box={cropBox}
+            fullWidth={render.fullWidth}
+            fullHeight={render.fullHeight}
+            label={`crop ${cropBox.x1 - cropBox.x0}×${cropBox.y1 - cropBox.y0}`}
+          />
+        )}
+        {segBox && render && (
+          <LabeledBox
+            box={segBox}
+            fullWidth={render.fullWidth}
+            fullHeight={render.fullHeight}
+            label={`seg ${segBox.x1 - segBox.x0}×${segBox.y1 - segBox.y0}`}
+          />
+        )}
+        {/* Center crosshair — horizontal + vertical lines through the image
+            center. Square arrays in this aspect-square box via object-contain,
+            so 50% lands on the true center. */}
+        {centerAxes && hasLoadedOnce && !error && (
+          <>
+            <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-white/50 pointer-events-none" />
+            <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-white/50 pointer-events-none" />
+          </>
+        )}
         {!hasLoadedOnce && (
           <div className="absolute inset-0 flex items-center justify-center">
             <Loader2 className="w-5 h-5 text-beam animate-spin" />
@@ -602,7 +800,9 @@ function TiledImageTile({
 }
 
 export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
-  const [sources, setSources] = useState<SourceInfo>({ iterativeSource: null, hasVit: false, hasVitAmp: false, hasDiffraction: false });
+  const [sources, setSources] = useState<SourceInfo>({ iterativeSource: null, hasVit: false, hasVitAmp: false, hasVitSegMask: false, hasDiffraction: false });
+  // Toggle for the segmentation mask overlay on the detector frame.
+  const [showMask, setShowMask] = useState(true);
   const [isDiscovering, setIsDiscovering] = useState(true);
   const [iteration, setIteration] = useState<number | null>(null);
   const [vitBatch, setVitBatch] = useState<number | null>(null);
@@ -620,7 +820,16 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
     recon_mode?: string;
     run_uid?: string;
     dp_stride?: number;
+    patch_crop_box?: unknown;
+    segmentation_box?: unknown;
   } | undefined;
+  // Inner-crop rectangle drawn on the ViT amp/phase patch tiles. Absent on runs
+  // written before holoptycho started recording it → parseCropBox returns null
+  // and the overlay is simply skipped.
+  const patchCropBox = parseCropBox(containerMeta?.patch_crop_box);
+  // Segmentation rectangle drawn on the detector-frame tile (same format,
+  // detector-pixel coords). Skipped when absent/malformed.
+  const segBox = parseCropBox(containerMeta?.segmentation_box);
   // Stride between persisted detector frames. 1 = every frame stored;
   // larger values mean only 1-in-N frames were saved (vit-only runs
   // default to 1000 to keep WAN writes cheap). The detector tile's
@@ -660,10 +869,28 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
     return () => { cancelled = true; };
   }, [path]);
 
+  // Re-discover on a timer so plots that get written partway through a run
+  // (live/, vit/, diffraction/, the mosaics, the segmentation mask, …) appear
+  // on their own — no need to reselect the dataset to force a refresh. Uses
+  // fresh (uncached) listings and only updates state when something changed.
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => {
+      discoverSources(path).then(result => {
+        if (cancelled) return;
+        setSources(prev => (sameSources(prev, result) ? prev : result));
+      });
+    };
+    const handle = setInterval(refresh, DISCOVERY_POLL_MS);
+    return () => { cancelled = true; clearInterval(handle); };
+  }, [path]);
+
   // WebSocket subscription on the run container picks up newly-created sub-containers
   // (e.g. live/ appears partway through a run). We re-run discovery on creation.
   const handleNewItem = useCallback(() => {
-    discoverSources(path).then(setSources);
+    discoverSources(path).then(result => {
+      setSources(prev => (sameSources(prev, result) ? prev : result));
+    });
   }, [path]);
   useTiledSubscription(path, handleNewItem, { enabled: true });
 
@@ -814,6 +1041,9 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
                 // so polling just wastes round-trips.
                 pollIntervalMs={isFollowingLatest ? POLL_INTERVAL_MS : 0}
                 onChanged={handleFrameChanged}
+                centerAxes
+                segBox={segBox}
+                maskPath={showMask && sources.hasVitSegMask ? `${path}/vit/segmentation_mask` : undefined}
               />
               <TiledImageTile
                 title="ViT patch (amp)"
@@ -821,6 +1051,8 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
                 path={`${path}/diffraction/inference`}
                 slice={`${displayFrameIdx},0`}
                 pollIntervalMs={isFollowingLatest ? POLL_INTERVAL_MS : 0}
+                cropBox={patchCropBox}
+                centerAxes
               />
               <TiledImageTile
                 title="ViT patch (phase)"
@@ -828,6 +1060,8 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
                 path={`${path}/diffraction/inference`}
                 slice={`${displayFrameIdx},1`}
                 pollIntervalMs={isFollowingLatest ? POLL_INTERVAL_MS : 0}
+                cropBox={patchCropBox}
+                centerAxes
               />
 
             </div>
@@ -872,6 +1106,22 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
             <Activity className="w-3 h-3 text-cell" />
             {containerMeta.recon_mode}
           </span>
+        )}
+        {sources.hasVitSegMask && (
+          <button
+            type="button"
+            onClick={() => setShowMask((v) => !v)}
+            aria-pressed={showMask}
+            title={showMask ? 'Hide segmentation mask' : 'Show segmentation mask'}
+            className={`flex items-center gap-1 px-2 py-0.5 rounded border transition-colors ${
+              showMask
+                ? 'text-beam border-beam/40 hover:bg-beam/10'
+                : 'text-text-tertiary border-border-subtle hover:text-text-secondary hover:border-border-medium'
+            }`}
+          >
+            {showMask ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
+            <span className="uppercase tracking-wider">Mask</span>
+          </button>
         )}
         {sources.iterativeSource === 'live' && (
           <span className="ml-auto text-text-tertiary">
