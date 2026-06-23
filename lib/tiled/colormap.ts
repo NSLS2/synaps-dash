@@ -66,10 +66,10 @@ export interface ViewRect {
 // behaviour. NaN pixels are written with alpha=0 so the underlying surface
 // shows through.
 //
-// When `antiTranspose` is true the image is reflected across the anti-diagonal
-// (axes swapped and reversed: pixel (x,y) → (H-1-y, W-1-x)), which also swaps
-// the canvas dimensions. The `view` rectangle is expressed in these final
-// display coordinates, so zoom interactions don't need to undo the transpose.
+// When `rotateCCW` is true the image is rotated 90° counter-clockwise
+// (pixel (x,y) → (y, W-1-x)), which also swaps the canvas dimensions. The
+// `view` rectangle is expressed in these final display coordinates, so zoom
+// interactions don't need to undo the rotation.
 //
 // Float arrays carry NaN through; integer arrays (e.g. uint16 detector
 // frames) are always finite, so the NaN check is a no-op for them. One
@@ -97,12 +97,13 @@ export function paintFloatArrayToCanvas(
   data: Float32Array | Float64Array | Uint16Array | Uint8Array,
   width: number,
   height: number,
-  antiTranspose: boolean = false,
+  rotateCCW: boolean = false,
   view?: ViewRect,
 ): PaintResult {
-  // Full display dimensions after the optional anti-transpose.
-  const fullWidth = antiTranspose ? height : width;
-  const fullHeight = antiTranspose ? width : height;
+  // Full display dimensions after the optional 90° CCW rotation (which swaps
+  // width/height).
+  const fullWidth = rotateCCW ? height : width;
+  const fullHeight = rotateCCW ? width : height;
 
   // Resolve + clamp the view rectangle (display coords). Omitted → whole image.
   const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
@@ -129,8 +130,8 @@ export function paintFloatArrayToCanvas(
     if (Number.isNaN(v) || !Number.isFinite(v)) continue;
     const sx = i % width;
     const sy = (i / width) | 0;
-    const dx = antiTranspose ? height - 1 - sy : sx;
-    const dy = antiTranspose ? width - 1 - sx : sy;
+    const dx = rotateCCW ? sy : sx;
+    const dy = rotateCCW ? width - 1 - sx : sy;
     if (dx < vx0 || dx >= vx1 || dy < vy0 || dy >= vy1) continue;
     viewAll.push(v);
     if (dx >= cx0 && dx < cx1 && dy >= cy0 && dy < cy1) central.push(v);
@@ -167,12 +168,12 @@ export function paintFloatArrayToCanvas(
   const out = imageData.data;
   for (let i = 0; i < data.length; i++) {
     const v = data[i];
-    // Map the source index to display coords; anti-transpose reflects across
-    // the anti-diagonal: (x,y)→(H-1-y, W-1-x).
+    // Map the source index to display coords. A 90° CCW rotation sends source
+    // (x, y) → display (y, W-1-x).
     const sx = i % width;
     const sy = (i / width) | 0;
-    const dx = antiTranspose ? height - 1 - sy : sx;
-    const dy = antiTranspose ? width - 1 - sx : sy;
+    const dx = rotateCCW ? sy : sx;
+    const dy = rotateCCW ? width - 1 - sx : sy;
     // Skip anything outside the visible view rectangle.
     if (dx < vx0 || dx >= vx1 || dy < vy0 || dy >= vy1) continue;
     const o = ((dy - vy0) * viewW + (dx - vx0)) * 4;

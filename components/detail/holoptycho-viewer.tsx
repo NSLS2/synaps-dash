@@ -559,9 +559,9 @@ interface TiledImageTileProps {
   // Called whenever a fresh image is loaded (i.e. ETag changed). Lets the parent
   // update timestamps and metadata-derived state.
   onChanged?: () => void;
-  // Anti-transpose the rendered image (reflect across the anti-diagonal).
-  // Applied in the pixel painter so non-square mosaics keep correct dimensions.
-  antiTranspose?: boolean;
+  // Rotate the rendered image 90° counter-clockwise. Applied in the pixel
+  // painter so non-square mosaics keep correct dimensions.
+  rotateCCW?: boolean;
   // Draw pixel-index x/y axes around the image and a numeric colorbar showing
   // the display range. Used for the ViT mosaics.
   decorated?: boolean;
@@ -586,7 +586,7 @@ function TiledImageTile({
   slice,
   pollIntervalMs,
   onChanged,
-  antiTranspose = false,
+  rotateCCW = false,
   decorated = false,
   cropBox,
   segBox,
@@ -629,13 +629,13 @@ function TiledImageTile({
     const d = dataRef.current;
     const canvas = canvasRef.current;
     if (!d || !canvas) return;
-    const r = paintFloatArrayToCanvas(canvas, d.data, d.w, d.h, antiTranspose, v ?? undefined);
+    const r = paintFloatArrayToCanvas(canvas, d.data, d.w, d.h, rotateCCW, v ?? undefined);
     setRender({
       min: r.min, max: r.max,
       x0: r.x0, y0: r.y0, width: r.width, height: r.height,
       fullWidth: r.fullWidth, fullHeight: r.fullHeight,
     });
-  }, [antiTranspose]);
+  }, [rotateCCW]);
   const paintRef = useRef(paint);
   useEffect(() => { paintRef.current = paint; }, [paint]);
 
@@ -745,7 +745,7 @@ function TiledImageTile({
     }
     const handle = setInterval(tick, pollIntervalMs);
     return () => { cancelled = true; clearInterval(handle); };
-  }, [path, slice, pollIntervalMs, antiTranspose]);
+  }, [path, slice, pollIntervalMs, rotateCCW]);
 
   // Decorated tiles (the ViT mosaics) get pixel-index x/y axes and a numeric
   // colorbar; everything else renders just the bare canvas.
@@ -1040,7 +1040,7 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
             path={`${path}/vit/mosaic_amp`}
             slice=":,:"
             pollIntervalMs={vitPollMs}
-            antiTranspose
+            rotateCCW
             decorated
           />
         )}
@@ -1052,7 +1052,7 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
             slice=":,:"
             pollIntervalMs={vitPollMs}
             onChanged={handleVitChanged}
-            antiTranspose
+            rotateCCW
             decorated
           />
         )}
