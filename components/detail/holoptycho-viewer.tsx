@@ -231,6 +231,30 @@ function sameSources(a: SourceInfo, b: SourceInfo): boolean {
   );
 }
 
+// Merge a fresh discovery snapshot into the previous one monotonically. Sub-
+// containers/arrays only ever appear during a run, so a flag that was already
+// true must stay true even if a transient (failed/empty) poll comes back blank.
+// Without this, a momentary listing hiccup would unmount tiles and reset
+// dependent state — notably the frame-follow high-water in useLatestFilledIndex,
+// which made the detector-frame slider jump back to the start.
+function mergeSources(prev: SourceInfo, next: SourceInfo): SourceInfo {
+  return {
+    iterativeSource: next.iterativeSource ?? prev.iterativeSource,
+    hasVit: prev.hasVit || next.hasVit,
+    hasVitAmp: prev.hasVitAmp || next.hasVitAmp,
+    hasVitSegMask: prev.hasVitSegMask || next.hasVitSegMask,
+    hasDiffraction: prev.hasDiffraction || next.hasDiffraction,
+  };
+}
+
+const EMPTY_SOURCES: SourceInfo = {
+  iterativeSource: null,
+  hasVit: false,
+  hasVitAmp: false,
+  hasVitSegMask: false,
+  hasDiffraction: false,
+};
+
 // Cadence for re-checking which sub-containers/arrays exist, so new plots show
 // up on their own while a run is still being written.
 const DISCOVERY_POLL_MS = 3000;
@@ -800,7 +824,7 @@ function TiledImageTile({
 }
 
 export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
-  const [sources, setSources] = useState<SourceInfo>({ iterativeSource: null, hasVit: false, hasVitAmp: false, hasVitSegMask: false, hasDiffraction: false });
+  const [sources, setSources] = useState<SourceInfo>(EMPTY_SOURCES);
   // Toggle for the segmentation mask overlay on the detector frame.
   const [showMask, setShowMask] = useState(true);
   const [isDiscovering, setIsDiscovering] = useState(true);
@@ -856,11 +880,15 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
   const isFollowingLatest = selectedFrameIdx === null;
 
   // Initial discovery: figure out which sub-containers exist on this run.
+  // Reset to empty first so switching datasets doesn't carry over (or merge
+  // against) the previous run's flags.
   useEffect(() => {
     let cancelled = false;
     setIsDiscovering(true);
+    setSources(EMPTY_SOURCES);
     setIteration(null);
     setVitBatch(null);
+    setSelectedFrameIdx(null);
     discoverSources(path).then(result => {
       if (cancelled) return;
       setSources(result);
@@ -872,13 +900,17 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
   // Re-discover on a timer so plots that get written partway through a run
   // (live/, vit/, diffraction/, the mosaics, the segmentation mask, …) appear
   // on their own — no need to reselect the dataset to force a refresh. Uses
-  // fresh (uncached) listings and only updates state when something changed.
+  // fresh (uncached) listings and merges monotonically so a transient empty
+  // poll never makes existing tiles disappear.
   useEffect(() => {
     let cancelled = false;
     const refresh = () => {
       discoverSources(path).then(result => {
         if (cancelled) return;
-        setSources(prev => (sameSources(prev, result) ? prev : result));
+        setSources(prev => {
+          const merged = mergeSources(prev, result);
+          return sameSources(prev, merged) ? prev : merged;
+        });
       });
     };
     const handle = setInterval(refresh, DISCOVERY_POLL_MS);
@@ -889,7 +921,10 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
   // (e.g. live/ appears partway through a run). We re-run discovery on creation.
   const handleNewItem = useCallback(() => {
     discoverSources(path).then(result => {
-      setSources(prev => (sameSources(prev, result) ? prev : result));
+      setSources(prev => {
+        const merged = mergeSources(prev, result);
+        return sameSources(prev, merged) ? prev : merged;
+      });
     });
   }, [path]);
   useTiledSubscription(path, handleNewItem, { enabled: true });
