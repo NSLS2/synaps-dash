@@ -69,7 +69,10 @@ export interface ViewRect {
 // When `rotateCCW` is true the image is rotated 90° counter-clockwise
 // (pixel (x,y) → (y, W-1-x)), which also swaps the canvas dimensions. The
 // `view` rectangle is expressed in these final display coordinates, so zoom
-// interactions don't need to undo the rotation.
+// interactions don't need to undo the transform.
+//
+// When `logScale` is true, values are log-compressed (log10(v+1)) before
+// contrast + colormapping — useful for high-dynamic-range detector frames.
 //
 // Float arrays carry NaN through; integer arrays (e.g. uint16 detector
 // frames) are always finite, so the NaN check is a no-op for them. One
@@ -99,7 +102,13 @@ export function paintFloatArrayToCanvas(
   height: number,
   rotateCCW: boolean = false,
   view?: ViewRect,
+  logScale: boolean = false,
 ): PaintResult {
+  // Optional log compression for high-dynamic-range data (e.g. detector
+  // frames). log10(v + 1) keeps zero at zero and is monotonic; applied to both
+  // the contrast sampling and the per-pixel mapping so they stay consistent.
+  const tx = logScale ? (val: number) => Math.log10(Math.max(val, 0) + 1) : (val: number) => val;
+
   // Full display dimensions after the optional 90° CCW rotation (which swaps
   // width/height).
   const fullWidth = rotateCCW ? height : width;
@@ -133,8 +142,9 @@ export function paintFloatArrayToCanvas(
     const dx = rotateCCW ? sy : sx;
     const dy = rotateCCW ? width - 1 - sx : sy;
     if (dx < vx0 || dx >= vx1 || dy < vy0 || dy >= vy1) continue;
-    viewAll.push(v);
-    if (dx >= cx0 && dx < cx1 && dy >= cy0 && dy < cy1) central.push(v);
+    const tv = tx(v);
+    viewAll.push(tv);
+    if (dx >= cx0 && dx < cx1 && dy >= cy0 && dy < cy1) central.push(tv);
   }
   let [min, max] = loHiPercentile(central);
   // Fall back to the whole-view range if the central region is empty/constant.
@@ -181,7 +191,7 @@ export function paintFloatArrayToCanvas(
       out[o] = 0; out[o + 1] = 0; out[o + 2] = 0; out[o + 3] = 0;
       continue;
     }
-    let norm = Math.round(((v - safeMin) / range) * 255);
+    let norm = Math.round(((tx(v) - safeMin) / range) * 255);
     if (norm < 0) norm = 0;
     else if (norm > 255) norm = 255;
     const [r, g, b] = VIRIDIS_LUT[norm];

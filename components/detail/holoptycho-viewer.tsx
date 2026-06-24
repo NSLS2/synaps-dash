@@ -259,6 +259,52 @@ const EMPTY_SOURCES: SourceInfo = {
 // up on their own while a run is still being written.
 const DISCOVERY_POLL_MS = 3000;
 
+// Poll a mosaic array's shape to support both single mosaics and stacks. A 2D
+// (H, W) array is a single mosaic; a 3D (N, H, W) array is a stack of N mosaics
+// that grows while a run is live. Returns the (monotonic) count and whether it
+// is stacked, or null until the shape is first known.
+function useMosaicStack(
+  path: string,
+  pollIntervalMs: number,
+): { count: number; stacked: boolean } | null {
+  const [stack, setStack] = useState<{ count: number; stacked: boolean } | null>(null);
+
+  useEffect(() => {
+    setStack(null);
+    if (!path) return;
+    let cancelled = false;
+    let inflight = false;
+    let hi = 0;
+
+    const tick = async () => {
+      if (cancelled || inflight) return;
+      inflight = true;
+      try {
+        const info = await fetchArrayInfo(path).catch(() => null);
+        // TEMP DIAGNOSTIC — remove once the mosaic slider is confirmed working.
+        console.log('[useMosaicStack]', path, 'shape=', info?.shape);
+        if (!info || cancelled || info.shape.length < 2) return;
+        const stacked = info.shape.length >= 3;
+        const count = stacked ? info.shape[0] : 1;
+        if (count < hi) return; // monotonic — never shrink mid-run
+        hi = count;
+        setStack(prev =>
+          prev && prev.count === count && prev.stacked === stacked ? prev : { count, stacked },
+        );
+      } finally {
+        inflight = false;
+      }
+    };
+
+    tick();
+    if (!pollIntervalMs) return () => { cancelled = true; };
+    const handle = setInterval(tick, pollIntervalMs);
+    return () => { cancelled = true; clearInterval(handle); };
+  }, [path, pollIntervalMs]);
+
+  return stack;
+}
+
 // Viridis gradient stops for the colorbar SVG (matches VIRIDIS_LUT endpoints).
 const VIRIDIS_GRADIENT_STOPS = [
   { offset: 0, color: 'rgb(68,1,84)' },
@@ -328,11 +374,36 @@ interface DecoratedImageTileProps {
   // Drag-selected a region (display coords) to zoom into.
   onZoom: (rect: ViewRect) => void;
   onResetZoom: () => void;
+  // Optional LOG-scale toggle shown on the image.
+  allowLogScale?: boolean;
+  logScale?: boolean;
+  onToggleLog?: () => void;
 }
 
 // A normalized drag rectangle (0–1) within the image box, used to render the
 // live selection overlay while the user drags.
 interface DragRect { x0: number; y0: number; x1: number; y1: number }
+
+// Small overlay toggle for log-scale display. `stopPropagation` on pointer-down
+// keeps a click from starting a zoom drag on the decorated tiles.
+function LogToggle({ active, onToggle, className }: { active: boolean; onToggle: () => void; className?: string }) {
+  return (
+    <button
+      type="button"
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={onToggle}
+      aria-pressed={active}
+      title="Toggle log scale"
+      className={`z-10 px-1.5 py-0.5 rounded border text-[10px] uppercase tracking-wider ${
+        active
+          ? 'bg-beam/20 border-beam/60 text-beam'
+          : 'bg-surface-ground/85 border-border-subtle text-text-tertiary hover:text-text-secondary'
+      } ${className ?? ''}`}
+    >
+      log
+    </button>
+  );
+}
 
 // Wraps the bare canvas with pixel-index x/y axes (ticked every 100 px at full
 // zoom) and a numeric viridis colorbar. The image box is sized to the rendered
@@ -352,6 +423,9 @@ function DecoratedImageTile({
   isZoomed,
   onZoom,
   onResetZoom,
+  allowLogScale = false,
+  logScale = false,
+  onToggleLog,
 }: DecoratedImageTileProps) {
   const imageBoxRef = useRef<HTMLDivElement | null>(null);
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -470,6 +544,9 @@ function DecoratedImageTile({
               style={sel}
             />
           )}
+          {allowLogScale && onToggleLog && (
+            <LogToggle active={logScale} onToggle={onToggleLog} className="absolute top-1 left-1" />
+          )}
           {isZoomed && (
             <button
               type="button"
@@ -577,6 +654,10 @@ interface TiledImageTileProps {
   // Draw horizontal + vertical lines through the image center (e.g. to mark the
   // detector center on the diffraction frame).
   centerAxes?: boolean;
+  // Show a LOG toggle on the image that log-compresses values (log10(v+1))
+  // before contrast + colormapping. Useful for high-dynamic-range data
+  // (detector frames, mosaics).
+  allowLogScale?: boolean;
 }
 
 function TiledImageTile({
@@ -592,9 +673,12 @@ function TiledImageTile({
   segBox,
   maskPath,
   centerAxes = false,
+  allowLogScale = false,
 }: TiledImageTileProps) {
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Whether to log-compress the displayed values (toggled via the LOG button).
+  const [logScale, setLogScale] = useState(false);
   // Display range + rendered view (origin/size in display coords) + full
   // display dimensions from the last paint — drives the colorbar labels, axis
   // tick ranges and zoom clamping (only used when `decorated`).
@@ -629,13 +713,13 @@ function TiledImageTile({
     const d = dataRef.current;
     const canvas = canvasRef.current;
     if (!d || !canvas) return;
-    const r = paintFloatArrayToCanvas(canvas, d.data, d.w, d.h, rotateCCW, v ?? undefined);
+    const r = paintFloatArrayToCanvas(canvas, d.data, d.w, d.h, rotateCCW, v ?? undefined, logScale);
     setRender({
       min: r.min, max: r.max,
       x0: r.x0, y0: r.y0, width: r.width, height: r.height,
       fullWidth: r.fullWidth, fullHeight: r.fullHeight,
     });
-  }, [rotateCCW]);
+  }, [rotateCCW, logScale]);
   const paintRef = useRef(paint);
   useEffect(() => { paintRef.current = paint; }, [paint]);
 
@@ -761,6 +845,9 @@ function TiledImageTile({
         isZoomed={view !== null}
         onZoom={setView}
         onResetZoom={() => setView(null)}
+        allowLogScale={allowLogScale}
+        logScale={logScale}
+        onToggleLog={() => setLogScale((s) => !s)}
       />
     );
   }
@@ -801,11 +888,18 @@ function TiledImageTile({
         )}
         {/* Center crosshair — horizontal + vertical lines through the image
             center. Square arrays in this aspect-square box via object-contain,
-            so 50% lands on the true center. */}
-        {centerAxes && hasLoadedOnce && !error && (
+            so 50% lands on the true center. Inline styles avoid relying on
+            Tailwind utilities (w-px etc.) that could collapse the lines. */}
+        {centerAxes && (
           <>
-            <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-white/50 pointer-events-none" />
-            <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-white/50 pointer-events-none" />
+            <div
+              className="absolute pointer-events-none z-10"
+              style={{ top: 0, bottom: 0, left: '50%', width: '1px', marginLeft: '-0.5px', backgroundColor: 'rgba(255,255,255,0.85)', boxShadow: '0 0 1.5px rgba(0,0,0,0.9)' }}
+            />
+            <div
+              className="absolute pointer-events-none z-10"
+              style={{ left: 0, right: 0, top: '50%', height: '1px', marginTop: '-0.5px', backgroundColor: 'rgba(255,255,255,0.85)', boxShadow: '0 0 1.5px rgba(0,0,0,0.9)' }}
+            />
           </>
         )}
         {!hasLoadedOnce && (
@@ -818,6 +912,9 @@ function TiledImageTile({
             {error}
           </div>
         )}
+        {allowLogScale && (
+          <LogToggle active={logScale} onToggle={() => setLogScale((s) => !s)} className="absolute top-1 left-1" />
+        )}
       </div>
     </div>
   );
@@ -828,6 +925,11 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
   // Toggle for the segmentation mask overlay on the detector frame.
   const [showMask, setShowMask] = useState(true);
   const [isDiscovering, setIsDiscovering] = useState(true);
+  // Live copy of the run-container metadata. The `metadata` prop is the listing
+  // snapshot from when the item was selected, so fields the pipeline writes
+  // mid-run (patch_crop_box, segmentation_box, …) aren't there yet. We poll the
+  // metadata endpoint so those overlays appear without a manual refresh.
+  const [liveMeta, setLiveMeta] = useState<Record<string, unknown> | null>(null);
   const [iteration, setIteration] = useState<number | null>(null);
   const [vitBatch, setVitBatch] = useState<number | null>(null);
   // Wall-clock time of the most recent refresh — drives the "updated Xs ago" indicator.
@@ -839,7 +941,7 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
     return () => clearInterval(handle);
   }, []);
 
-  const containerMeta = metadata as {
+  const containerMeta = (liveMeta ?? metadata) as {
     scan_id?: number | string;
     recon_mode?: string;
     run_uid?: string;
@@ -879,6 +981,43 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
     selectedFrameIdx !== null ? selectedFrameIdx : latestFrameIdx;
   const isFollowingLatest = selectedFrameIdx === null;
 
+  // Mosaic stack: one shared slider drives the index for both the amp and phase
+  // mosaics. Probe the phase mosaic (or amp, whichever exists) for the count.
+  const mosaicProbePath = sources.hasVit
+    ? `${path}/vit/mosaic`
+    : sources.hasVitAmp
+      ? `${path}/vit/mosaic_amp`
+      : '';
+  const mosaicStack = useMosaicStack(
+    mosaicProbePath,
+    sources.iterativeSource === 'live' || !sources.iterativeSource ? POLL_INTERVAL_MS : 0,
+  );
+  const [selectedMosaicIdx, setSelectedMosaicIdx] = useState<number | null>(null);
+  const mosaicCount = mosaicStack?.count ?? null;
+  const mosaicStacked = mosaicStack?.stacked ?? false;
+  const latestMosaicIdx = mosaicCount !== null ? mosaicCount - 1 : null;
+  const displayMosaicIdx = selectedMosaicIdx !== null ? selectedMosaicIdx : latestMosaicIdx;
+  const isFollowingLatestMosaic = selectedMosaicIdx === null;
+
+  // Poll the run-container metadata so overlay fields written mid-run
+  // (patch_crop_box, segmentation_box) show up without a manual refresh.
+  useEffect(() => {
+    let cancelled = false;
+    let inflight = false;
+    setLiveMeta(null);
+    const tick = () => {
+      if (inflight) return;
+      inflight = true;
+      getMetadata(path)
+        .then(m => { if (!cancelled) setLiveMeta(m); })
+        .catch(() => { /* keep last known / fall back to prop */ })
+        .finally(() => { inflight = false; });
+    };
+    tick();
+    const handle = setInterval(tick, POLL_INTERVAL_MS);
+    return () => { cancelled = true; clearInterval(handle); };
+  }, [path]);
+
   // Initial discovery: figure out which sub-containers exist on this run.
   // Reset to empty first so switching datasets doesn't carry over (or merge
   // against) the previous run's flags.
@@ -889,6 +1028,7 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
     setIteration(null);
     setVitBatch(null);
     setSelectedFrameIdx(null);
+    setSelectedMosaicIdx(null);
     discoverSources(path).then(result => {
       if (cancelled) return;
       setSources(result);
@@ -983,6 +1123,12 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
     ? POLL_INTERVAL_MS
     : 0;
 
+  // Slice for the mosaic tiles: a single 2D mosaic is `:,:`; a 3D stack selects
+  // the current index off the leading axis.
+  const mosaicSlice = mosaicStacked && displayMosaicIdx !== null
+    ? `${displayMosaicIdx},:,:`
+    : ':,:';
+
   // Format last-update time as a short relative string for the footer.
   const formatRelative = (ts: number | null): string => {
     if (ts === null) return '—';
@@ -1033,28 +1179,66 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
             />
           </>
         )}
-        {sources.hasVitAmp && (
-          <TiledImageTile
-            title="ViT mosaic (amp)"
-            subtitle={vitBatch !== null ? `batch ${vitBatch}` : undefined}
-            path={`${path}/vit/mosaic_amp`}
-            slice=":,:"
-            pollIntervalMs={vitPollMs}
-            rotateCCW
-            decorated
-          />
-        )}
-        {sources.hasVit && (
-          <TiledImageTile
-            title="ViT mosaic (phase)"
-            subtitle={vitBatch !== null ? `batch ${vitBatch}` : undefined}
-            path={`${path}/vit/mosaic`}
-            slice=":,:"
-            pollIntervalMs={vitPollMs}
-            onChanged={handleVitChanged}
-            rotateCCW
-            decorated
-          />
+        {(sources.hasVit || sources.hasVitAmp) && (
+          <div className="flex flex-col col-span-2">
+            <div className="grid grid-cols-2 gap-3">
+              {sources.hasVitAmp && (
+                <TiledImageTile
+                  title="ViT mosaic (amp)"
+                  subtitle={vitBatch !== null ? `batch ${vitBatch}` : undefined}
+                  path={`${path}/vit/mosaic_amp`}
+                  slice={mosaicSlice}
+                  pollIntervalMs={vitPollMs}
+                  rotateCCW
+                  decorated
+                  allowLogScale
+                />
+              )}
+              {sources.hasVit && (
+                <TiledImageTile
+                  title="ViT mosaic (phase)"
+                  subtitle={vitBatch !== null ? `batch ${vitBatch}` : undefined}
+                  path={`${path}/vit/mosaic`}
+                  slice={mosaicSlice}
+                  pollIntervalMs={vitPollMs}
+                  onChanged={handleVitChanged}
+                  rotateCCW
+                  decorated
+                  allowLogScale
+                />
+              )}
+            </div>
+            {mosaicStacked && mosaicCount !== null && mosaicCount > 1 && latestMosaicIdx !== null && displayMosaicIdx !== null && (
+              <div className="flex items-center gap-2 mt-2 px-1">
+                <span className="text-xs text-text-secondary font-mono whitespace-nowrap min-w-[90px] text-center">
+                  mosaic {displayMosaicIdx + 1} / {mosaicCount}
+                </span>
+                <input
+                  type="range"
+                  min={0}
+                  max={latestMosaicIdx}
+                  step={1}
+                  value={displayMosaicIdx}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    // Snap-to-latest when dragged to the rightmost end.
+                    setSelectedMosaicIdx(v >= latestMosaicIdx ? null : v);
+                  }}
+                  aria-label="Mosaic index"
+                  className="flex-1 accent-beam"
+                />
+                {!isFollowingLatestMosaic && (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedMosaicIdx(null)}
+                    className="text-[10px] uppercase tracking-wider text-beam hover:text-beam-hover px-2 py-0.5 rounded border border-beam/40 hover:bg-beam/10"
+                  >
+                    Follow
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
         )}
         {sources.hasDiffraction && latestFrameIdx !== null && displayFrameIdx !== null && (
           <div className="flex flex-col col-span-2">
@@ -1079,6 +1263,7 @@ export function HoloptychoViewer({ path, metadata }: HoloptychoViewerProps) {
                 centerAxes
                 segBox={segBox}
                 maskPath={showMask && sources.hasVitSegMask ? `${path}/vit/segmentation_mask` : undefined}
+                allowLogScale
               />
               <TiledImageTile
                 title="ViT patch (amp)"
