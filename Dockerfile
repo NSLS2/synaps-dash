@@ -1,4 +1,4 @@
-FROM node:22-alpine AS base
+FROM node:22.23.4-alpine AS base
 
 # --- deps: install dependencies (compiles better-sqlite3, runs next-ws patch) ---
 FROM base AS deps
